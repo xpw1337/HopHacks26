@@ -2187,7 +2187,13 @@ def _(anywidget, traitlets):
         """
 
         _esm = r"""
-        const UNDER = [221, 107, 32];
+        const RAMP = [[45, 158, 96], [226, 168, 62], [200, 56, 44]];
+        const mixc = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+        const shade = (s) => {
+          const t = Math.max(0, Math.min(1, s));
+          const [a, b, f] = t < 0.5 ? [RAMP[0], RAMP[1], t / 0.5] : [RAMP[1], RAMP[2], (t - 0.5) / 0.5];
+          return `rgb(${mixc(a, b, f).join(",")})`;
+        };
 
         function render({ model, el }) {
           const [W, H] = model.get("size");
@@ -2251,7 +2257,7 @@ def _(anywidget, traitlets):
             for (const [csa, p] of Object.entries(paths)) {
               const s = sAt(csa, t);
               if (s === null) { p.setAttribute("fill", "rgba(150,150,150,0.12)"); continue; }
-              p.setAttribute("fill", `rgba(${UNDER.join(",")},${(0.06 + 0.94 * s).toFixed(3)})`);
+              p.setAttribute("fill", shade(s));
               const n = (model.get("labels")[csa] || {}).n || 0;
               num += s * n; den += n;
             }
@@ -2329,7 +2335,7 @@ def _(anywidget, traitlets):
                     background: transparent; color: inherit; font-size: 12px; }
         .fc-legend { display: flex; align-items: center; gap: 6px; margin-top: 6px; color: #888; font-size: 11px; }
         .fc-grad { width: 90px; height: 9px; border-radius: 2px;
-                   background: linear-gradient(90deg, rgba(221,107,32,0.06), rgb(221,107,32)); }
+                   background: linear-gradient(90deg, rgb(45,158,96), rgb(226,168,62), rgb(200,56,44)); }
         .fc-hint { margin-left: auto; }
         """
 
@@ -2397,8 +2403,15 @@ def _(anywidget, traitlets):
           ring(when) { this.tone(440, when, 1.1, 0.04); this.tone(480, when, 1.1, 0.04); },
         };
 
-        const RED = [221, 107, 32];
-        const rgba = (a) => `rgba(${RED[0]},${RED[1]},${RED[2]},${a.toFixed(3)})`;
+        // Still open is red, answered is green, and the midpoint is amber. Lightness climbs as well
+        // as hue, so the ramp still reads as an order for anyone who cannot separate red from green.
+        const RAMP = [[45, 158, 96], [226, 168, 62], [200, 56, 44]];
+        const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+        const shade = (s) => {
+          const t = Math.max(0, Math.min(1, s));
+          const [a, b, f] = t < 0.5 ? [RAMP[0], RAMP[1], t / 0.5] : [RAMP[1], RAMP[2], (t - 0.5) / 0.5];
+          return `rgb(${mix(a, b, f).join(",")})`;
+        };
 
         function render({ model, el }) {
           const [W, H] = model.get("size");
@@ -2418,6 +2431,8 @@ def _(anywidget, traitlets):
                   <div class="cs-count"></div>
                 </div>
                 <div class="cs-board"></div>
+                <div class="cs-bar"><i class="cs-bar-done"></i></div>
+                <div class="cs-end"></div>
                 <div class="cs-cap"></div>
               </div>
               <div class="cs-ctrl">
@@ -2432,6 +2447,7 @@ def _(anywidget, traitlets):
           const elPhase = $(".cs-phase"), elDay = $(".cs-day"), elDayW = $(".cs-dayw");
           const elSpeed = $(".cs-speed"), elCount = $(".cs-count"), elCap = $(".cs-cap");
           const elBoard = $(".cs-board"), btn = $(".cs-play"), skip = $(".cs-skip"), note = $(".cs-note");
+          const elBar = $(".cs-bar"), elBarDone = $(".cs-bar-done"), elEnd = $(".cs-end");
 
           const cur = () => model.get("curves") || {};
           const lab = () => model.get("labels") || {};
@@ -2494,12 +2510,14 @@ def _(anywidget, traitlets):
             let open = 0, tot = 0;
             for (const [csa, p] of Object.entries(paths)) {
               const s = sAt(csa, d);
-              if (s === null) { p.setAttribute("fill", "rgba(150,150,150,0.10)"); continue; }
-              p.setAttribute("fill", rgba(0.05 + 0.95 * s));
+              if (s === null) { p.setAttribute("fill", "rgba(255,255,255,0.10)"); continue; }
+              p.setAttribute("fill", shade(s));
               const n = (lab()[csa] || {}).n || 0; open += s * n; tot += n;
               const cd = clearDay(csa);
               if (cd !== null && d >= cd && !stampSet.has(csa)) {
-                stampSet.add(csa); cleared.push(csa); stamp(csa, cd);
+                stampSet.add(csa); cleared.push(csa);
+                const _cc = cen()[csa];
+                if (_cc) ring(_cc[0], _cc[1], 70, 700, "cs-done");
                 // pitched by finish order: the city plays a falling melody as neglect deepens
                 audio.tone(880 * Math.pow(0.945, cleared.length), 0, 0.42, 0.06, "triangle");
                 p.classList.add("cs-pop"); setTimeout(() => p.classList.remove("cs-pop"), 420);
@@ -2507,23 +2525,17 @@ def _(anywidget, traitlets):
             }
             const tot2 = Object.keys(cur()).length;
             elCount.innerHTML = `<b>${cleared.length}</b> of ${tot2} neighborhoods answered`;
+            elBar.classList.add("cs-on");
+            elBarDone.style.width = `${(100 * cleared.length) / Math.max(tot2, 1)}%`;
             elSpeed.textContent = `${Math.round(speedAt(cdAt === null ? 0 : performance.now() - cdAt))} days/sec`;
             drawBoard(d);
-          };
-
-          const stamp = (csa, day) => {
-            const c = cen()[csa]; if (!c) return;
-            const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
-            t.setAttribute("class", "cs-stamp"); t.setAttribute("x", c[0]); t.setAttribute("y", c[1]);
-            t.textContent = day === null ? "—" : "d" + day;
-            gS.appendChild(t);
           };
 
           const drawBoard = (d) => {
             const rows = Object.keys(cur()).map((csa) => ({ csa, s: sAt(csa, d), cd: clearDay(csa) }));
             rows.sort((a, b) => b.s - a.s);
             const top = rows.slice(0, 6);
-            elBoard.innerHTML = `<div class="cs-bh">still waiting</div>` + top.map((r) =>
+            elBoard.innerHTML = `<div class="cs-bh">longest still waiting</div>` + top.map((r) =>
               `<div class="cs-br"><span>${r.csa.split("/")[0]}</span><b>${Math.round(100 * r.s)}%</b></div>`
             ).join("");
           };
@@ -2688,17 +2700,35 @@ def _(anywidget, traitlets):
             cancelAnimationFrame(raf); raf = null; running = false;
             paintDay(hz());
             btn.textContent = "Replay"; btn.disabled = false;
-            const l = lab();
-            const stuck = Object.keys(cur())
-              .map((csa) => ({ csa, s: sAt(csa, hz()) }))
-              .filter((r) => r.s > 0.15).sort((a, b) => b.s - a.s);
-            for (const r of stuck) if (paths[r.csa]) paths[r.csa].classList.add("cs-stuck");
+
+            const rows = Object.keys(cur()).map((csa) => ({ csa, s: sAt(csa, hz()) }));
+            const stuck = rows.filter((r) => r.s > 0.12).sort((a, b) => b.s - a.s);
+            const origin = model.get("origin");
+            const me = rows.find((r) => r.csa === origin);
+
+            // Name the ones left waiting, on the map, where the red is. A day number told you when
+            // something finished; this tells you what never did.
+            gS.innerHTML = "";
+            for (const r of stuck.slice(0, 5)) {
+              const c = cen()[r.csa]; if (!c) continue;
+              const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+              t.setAttribute("class", "cs-tag"); t.setAttribute("x", c[0]); t.setAttribute("y", c[1]);
+              t.innerHTML = `${r.csa.split("/")[0]}<tspan x="${c[0]}" dy="15">`
+                + `${Math.round(100 * r.s)}% still waiting</tspan>`;
+              gS.appendChild(t);
+              if (paths[r.csa]) paths[r.csa].classList.add("cs-stuck");
+            }
+
             elPhase.textContent = "Six months later";
-            elCap.innerHTML = stuck.length
-              ? `<b>${stuck.length}</b> neighborhoods are still waiting: `
-                + stuck.slice(0, 4).map((r) => `${r.csa.split("/")[0]} <b>${Math.round(100 * r.s)}%</b>`).join(" &middot; ")
-                + `. The call we opened with came from <b>${model.get("origin").split("/")[0]}</b>.`
-              : "Every neighborhood was answered inside six months.";
+            elCap.textContent = "";
+            elEnd.innerHTML = stuck.length
+              ? `<div class="cs-end-n"><b>${rows.length - stuck.length}</b> of ${rows.length} answered</div>
+                 <div class="cs-end-s"><b>${stuck.length}</b> still waiting after ${hz()} days</div>
+                 <div class="cs-end-o">The call came from ${origin.split("/")[0]}, still
+                   <b>${Math.round(100 * (me ? me.s : 0))}%</b> unanswered.</div>`
+              : `<div class="cs-end-n"><b>all ${rows.length}</b> answered</div>
+                 <div class="cs-end-s">every neighborhood inside ${hz()} days</div>`;
+            elEnd.classList.add("cs-on");
           };
 
           const tick = (now) => {
@@ -2725,8 +2755,10 @@ def _(anywidget, traitlets):
             for (const p of Object.values(paths)) p.className.baseVal = "cs-area";
             elPhase.textContent = ""; elCap.textContent = ""; elCount.textContent = "";
             elSpeed.textContent = ""; elBoard.innerHTML = ""; elDay.textContent = "0";
+            elEnd.innerHTML = ""; elEnd.classList.remove("cs-on");
+            elBar.classList.remove("cs-on"); elBarDone.style.width = "0%";
             elDayW.classList.remove("cs-on");
-            for (const [csa, p] of Object.entries(paths)) p.setAttribute("fill", "rgba(150,150,150,0.10)");
+            for (const [csa, p] of Object.entries(paths)) p.setAttribute("fill", "rgba(255,255,255,0.10)");
             note.textContent = Object.keys(model.get("clips") || {}).length
               ? "" : "no audio assets found — playing silent";
           };
@@ -2754,17 +2786,17 @@ def _(anywidget, traitlets):
 
         _css = r"""
         .cs-wrap { font: 13px system-ui, -apple-system, sans-serif; }
-        .cs-stage { position: relative; background: #0d1117; border-radius: 10px; padding: 14px 14px 10px;
-                    box-shadow: inset 0 0 120px rgba(0,0,0,0.65); overflow: hidden; }
+        .cs-stage { position: relative; background: #121821; border-radius: 10px; padding: 14px 14px 10px;
+                    overflow: hidden; }
         .cs-stage::after { content: ""; position: absolute; inset: 0; pointer-events: none;
-                           background: radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(0,0,0,0.55)); }
+                           background: radial-gradient(ellipse at 50% 45%, transparent 68%, rgba(0,0,0,0.30)); }
         .cs-map { width: 100%; max-height: 460px; height: auto; display: block; background: transparent; }
-        .cs-area { stroke: rgba(255,255,255,0.16); stroke-width: 0.7; transition: fill 120ms linear; }
-        .cs-area.cs-lit { stroke: rgba(255,255,255,0.28); }
+        .cs-area { stroke: rgba(255,255,255,0.3); stroke-width: 0.7; transition: fill 120ms linear; }
+        .cs-area.cs-lit { stroke: rgba(255,255,255,0.42); }
         .cs-area.cs-shout-a { stroke: #f6ad55; stroke-width: 2; }
         .cs-area.cs-origin { stroke: #dd6b20; stroke-width: 3; animation: cs-pulse 1.1s ease-out 3; }
         .cs-area.cs-pop { stroke: #2b6cb0; stroke-width: 3; }
-        .cs-area.cs-stuck { stroke: #dd6b20; stroke-width: 2.2; animation: cs-pulse 2.2s ease-in-out infinite; }
+        .cs-area.cs-stuck { stroke: #ff6b5a; stroke-width: 2.6; animation: cs-pulse 2.2s ease-in-out infinite; }
         @keyframes cs-pulse { 0%,100% { stroke-opacity: 1; } 50% { stroke-opacity: 0.25; } }
 
         .cs-card { opacity: 0; transition: transform 380ms cubic-bezier(.2,1.4,.4,1), opacity 260ms; }
@@ -2783,7 +2815,10 @@ def _(anywidget, traitlets):
         .cs-ring.cs-echo { stroke: #f6ad55; stroke-width: 2; opacity: 0.7; }
         .cs-ring.cs-burst { stroke: #fff; stroke-width: 2.5; opacity: 0.9; }
         .cs-area.cs-hit { stroke: #f6ad55; stroke-width: 2.2; }
-        .cs-stamp { fill: #2b6cb0; font: 600 9px system-ui; text-anchor: middle; }
+        .cs-ring.cs-done { stroke: #2d9e60; stroke-width: 3; opacity: 0.9; }
+        .cs-tag { font: 600 13px system-ui; text-anchor: middle; paint-order: stroke;
+                  stroke: rgba(0,0,0,0.85); stroke-width: 3.5px; fill: #fff; }
+        .cs-tag tspan { font-weight: 400; font-size: 11px; fill: #ff9f8c; }
 
         .cs-hud { position: absolute; top: 14px; left: 18px; right: 18px; z-index: 3; display: flex;
                   align-items: baseline; gap: 12px; pointer-events: none; }
@@ -2805,9 +2840,28 @@ def _(anywidget, traitlets):
         .cs-br { display: flex; justify-content: space-between; padding: 1px 0; }
         .cs-br b { color: #f6ad55; font-variant-numeric: tabular-nums; }
 
+        .cs-bar { position: absolute; left: 18px; right: 18px; bottom: 74px; height: 4px; z-index: 3;
+                  background: rgba(255,255,255,0.12); border-radius: 2px; opacity: 0; transition: opacity 400ms; }
+        .cs-bar.cs-on { opacity: 1; }
+        .cs-bar-done { display: block; height: 100%; width: 0; border-radius: 2px;
+                       background: #2d9e60; transition: width 160ms linear; }
+
+        .cs-end { position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%) scale(0.96);
+                  z-index: 4; text-align: center; padding: 20px 28px; border-radius: 12px;
+                  background: rgba(8,12,18,0.88); border: 1px solid rgba(255,255,255,0.14);
+                  box-shadow: 0 18px 60px rgba(0,0,0,0.6); opacity: 0; pointer-events: none;
+                  transition: opacity 500ms ease, transform 500ms cubic-bezier(.2,1.3,.4,1); }
+        .cs-end.cs-on { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        .cs-end-n { font-size: 15px; color: #cfd8e3; }
+        .cs-end-n b { font-size: 34px; color: #2fbe74; font-variant-numeric: tabular-nums; }
+        .cs-end-s { margin-top: 6px; font-size: 15px; color: #cfd8e3; }
+        .cs-end-s b { font-size: 26px; color: #ff6b5a; font-variant-numeric: tabular-nums; }
+        .cs-end-o { margin-top: 10px; font-size: 12px; color: #8b98a8; max-width: 280px; }
+        .cs-end-o b { color: #ff9f8c; }
+
         .cs-cap { position: absolute; left: 0; right: 0; bottom: 0; min-height: 46px; z-index: 3;
                   padding: 14px 18px 16px; font-size: 17px; line-height: 1.4; color: #f2f4f7;
-                  background: linear-gradient(transparent, rgba(0,0,0,0.85) 45%); }
+                  background: linear-gradient(transparent, rgba(0,0,0,0.8) 62%); }
         .cs-cap b { color: #f6ad55; }
         .cs-ctrl { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
         .cs-play, .cs-skip { cursor: pointer; border: 1px solid rgba(127,127,127,0.4); border-radius: 4px;
