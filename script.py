@@ -2505,6 +2505,15 @@ def _(anywidget, traitlets):
 
           const clearDay = (csa) => { const l = lab()[csa] || {}; return l.clear === undefined ? null : l.clear; };
 
+          // Day zero means nothing has been answered yet, so the city starts wholly red. Anything
+          // without a curve stays a neutral grey rather than claiming to be either.
+          const fillsAt = (d) => {
+            for (const [csa, p] of Object.entries(paths)) {
+              const s = sAt(csa, d);
+              p.setAttribute("fill", s === null ? "rgba(255,255,255,0.10)" : shade(s));
+            }
+          };
+
           const paintDay = (d) => {
             elDay.textContent = Math.round(d);
             let open = 0, tot = 0;
@@ -2512,6 +2521,15 @@ def _(anywidget, traitlets):
               const s = sAt(csa, d);
               if (s === null) { p.setAttribute("fill", "rgba(255,255,255,0.10)"); continue; }
               p.setAttribute("fill", shade(s));
+              // The longer an area sits unanswered while its neighbours resolve, the angrier its
+              // outline gets. The fill still carries the number; this only draws the eye to it.
+              const rot = s > 0.5 ? Math.min(1, (d / hz()) * 1.6 * s) : 0;
+              if (rot > 0.04) {
+                p.style.stroke = `rgba(255,86,70,${(0.3 + 0.7 * rot).toFixed(2)})`;
+                p.style.strokeWidth = (0.7 + 2.3 * rot).toFixed(2);
+              } else if (p.style.stroke) {
+                p.style.stroke = ""; p.style.strokeWidth = "";
+              }
               const n = (lab()[csa] || {}).n || 0; open += s * n; tot += n;
               const cd = clearDay(csa);
               if (cd !== null && d >= cd && !stampSet.has(csa)) {
@@ -2662,6 +2680,7 @@ def _(anywidget, traitlets):
             }
             gR.innerHTML = "";
             for (const p of Object.values(paths)) p.classList.add("cs-lit");
+            fillsAt(0);
             elDayW.classList.add("cs-on");
           };
 
@@ -2758,7 +2777,8 @@ def _(anywidget, traitlets):
             elEnd.innerHTML = ""; elEnd.classList.remove("cs-on");
             elBar.classList.remove("cs-on"); elBarDone.style.width = "0%";
             elDayW.classList.remove("cs-on");
-            for (const [csa, p] of Object.entries(paths)) p.setAttribute("fill", "rgba(255,255,255,0.10)");
+            for (const p of Object.values(paths)) { p.style.stroke = ""; p.style.strokeWidth = ""; }
+            fillsAt(0);
             note.textContent = Object.keys(model.get("clips") || {}).length
               ? "" : "no audio assets found — playing silent";
           };
@@ -2862,6 +2882,7 @@ def _(anywidget, traitlets):
         .cs-cap { position: absolute; left: 0; right: 0; bottom: 0; min-height: 46px; z-index: 3;
                   padding: 14px 18px 16px; font-size: 17px; line-height: 1.4; color: #f2f4f7;
                   background: linear-gradient(transparent, rgba(0,0,0,0.8) 62%); }
+        .cs-cap:empty { background: none; }
         .cs-cap b { color: #f6ad55; }
         .cs-ctrl { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
         .cs-play, .cs-skip { cursor: pointer; border: 1px solid rgba(127,127,127,0.4); border-radius: 4px;
