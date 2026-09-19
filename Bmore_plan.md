@@ -21,7 +21,7 @@ The notebook ships with no opinion about which problem matters most. Officials s
 
 ## Rubric checklist (how we get scored)
 
-Source: `dsai_marimo_track_guideline_for_hackers.pdf`. Check every box before submitting.
+Source: the track's hacker guideline PDF (not committed; it is the organisers' document). Check every box before submitting.
 
 ### 1. Creativity & Impact (20%)
 - [ ] **Fresh angle:** we map the *gap* (need minus service), not just need. Say this in the first screen.
@@ -313,19 +313,9 @@ Block 7 steps:
 4. Walk the rubric checklist at the top of this file and tick every box.
 5. Time a read-through. Under 5 minutes to get the main point.
 
-### What to reuse from `prelim_script.py` (Block 1 to 3)
+### What we reused from the old starter script (done)
 
-The old script is a different idea and its file is cut off at the end, so it does not run. Copy only these pieces:
-
-- `SR_311_URL`, the 311 API link.
-- `fetch_arcgis_layer`, the paging loop. Fix it first: remove the 15,000 row cap, ask for lat/long, and check for API error replies.
-- The ms-to-date parsing in `load_311`.
-- The closed / late / days-open logic in `score_categories`. This is the base for the service closure rates.
-- `VACANT_URL` (vacancy by `CSA2010`), to cross-check our own vacancy numbers.
-- The quadrant chart code (median lines and corner labels), for the need-vs-service scatter.
-- Citations Chalfin 2021 (streetlights) and Branas 2018 (vacant lots), for the narrative. Check them before quoting.
-
-Do not reuse: the fake data fallback, its request type names (many are wrong), its regex type matching (crashes on `(BGE F`), its effect sizes as weights, or grouping by `Neighborhood`.
+`prelim_script.py` was a different idea (it ranked 311 *categories*, not areas) and its file was cut off, so it could not run. It is no longer in the repo. We kept only the 311 API link, the idea of a paging loop (rewritten: no row cap, asks for lat/long, checks for API errors), the millisecond-to-date parsing, the closed / late / days-open logic behind the service rates, the BNIA vacancy cross-check, and the quadrant chart's median lines and corner labels. We dropped its fake-data fallback, its request type names (many were invented), its regex type matching (it crashed on `(BGE F`), its effect sizes as weights, and grouping by `Neighborhood`.
 
 ### How we check the service fix works
 

@@ -6,7 +6,7 @@ Format: **date · tool · task** → what happened → how we checked → lesson
 
 ---
 
-**2026-09-19 · Claude Code · review old `prelim_script.py`**
+**2026-09-19 · Claude Code · review old `prelim_script.py`** (since removed from the repo)
 - Found the file is cut off mid-sentence at the end (line 1091), so it can't run.
 - Found many guessed 311 type names (e.g. `DOT-Pothole`; the real one is `TRM-Pickup Pothole`).
 - Found the type search would crash: one name has an open bracket `(BGE F`, which breaks the regex.
