@@ -9,6 +9,7 @@
 #     "shapely==2.1.2",
 #     "httpx==0.28.1",
 #     "anywidget==0.11.0",
+#     "scikit-learn==1.7.2",
 # ]
 # ///
 
@@ -31,6 +32,8 @@ def _():
     import marimo as mo
     import numpy as np
     import polars as pl
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.isotonic import IsotonicRegression
     import shapely
     import traitlets
     return (
@@ -41,6 +44,8 @@ def _():
         datetime,
         httpx,
         json,
+        HistGradientBoostingClassifier,
+        IsotonicRegression,
         mo,
         np,
         pl,
@@ -247,6 +252,217 @@ def _(mo):
 def _(explorer):
     explorer
     return
+
+
+@app.cell
+def _(FIX_HORIZON, fix_topics, mo, pl):
+    # The slowest topic carries the point, so let the data pick it rather than hard-coding a name.
+    _no_median = fix_topics.filter(pl.col("median_days").is_null()).sort("n", descending=True)
+    _w = _no_median.row(0, named=True) if _no_median.height else None
+    _punchline = (
+        f"**{_w['domain']}** is the case in point. The requests that did close took a median of "
+        f"{_w['naive_median_days']:.0f} days, which sounds survivable. But "
+        f"{100 * _w['still_open_at_horizon']:.0f}% of them are still open {FIX_HORIZON} days on, so the "
+        f"half-way mark never arrives and the honest answer is that it has no median at all."
+        if _w else
+        "Every topic here reaches its half-way mark inside the window."
+    )
+    mo.md(
+        rf"""
+    ### The fix clock
+
+    The map above asks which areas are under-served. This one asks a blunter question: **if you report
+    it today, when does it get fixed?**
+
+    Press play. Every area starts fully shaded, and the color drains as its requests close. Whatever is
+    still standing at the end never got fixed at all.
+
+    Averaging how long finished repairs took would answer the wrong question, because a request that is
+    never closed never enters the average. {_punchline}
+    """
+    )
+    return
+
+
+@app.cell
+def _(DATA_DIR, json, mo):
+    # Pre-recorded, replayed from disk. The notebook makes no API call here and none anywhere else:
+    # a live voice service is one more thing that can fail in front of a reader, and it would make the
+    # run non-reproducible. `scripts/make_call_demo.py` regenerates these assets by hand.
+    _f = DATA_DIR / "demo_call" / "transcript.json"
+    demo_calls = json.loads(_f.read_text()) if _f.exists() else []
+    call_pick = mo.ui.dropdown(
+        options={f'"{_c["text"][:52]}..."': _c["id"] for _c in demo_calls},
+        value=f'"{demo_calls[0]["text"][:52]}..."' if demo_calls else None,
+        label="**A resident calls it in**",
+    ) if demo_calls else None
+    return call_pick, demo_calls
+
+
+@app.cell
+def _(DATA_DIR, call_pick, demo_calls, fix_summary, mo, pl):
+    def call_panel(calls, picked, summary):
+        """Show a reported complaint next to what the clock predicts for it."""
+        _c = next((_x for _x in calls if _x["id"] == picked), None)
+        if _c is None:
+            return mo.md("")
+        _audio = DATA_DIR / "demo_call" / (_c["audio"] or "")
+        _row = summary.filter((pl.col("domain") == _c["domain"]) & (pl.col("csa") == _c["csa"]))
+        if _row.height:
+            _r = _row.row(0, named=True)
+            _med = "never reaches half" if _r["median_days"] is None else f"half gone by day {_r['median_days']}"
+            _verdict = (
+                f"Logged as **{_c['domain']}** in **{_c['csa']}**. Going on the "
+                f"{_r['n']:,} requests like it since January: **{100 * _r['fixed_by_7']:.0f}%** are fixed "
+                f"inside a week, **{100 * _r['fixed_by_30']:.0f}%** inside a month, and "
+                f"**{100 * _r['still_open_at_horizon']:.0f}%** are still open at the end &mdash; {_med}."
+            )
+        else:
+            _verdict = f"Logged as **{_c['domain']}** in **{_c['csa']}**, which has too few requests like it to score."
+        return mo.vstack(
+            [
+                mo.audio(str(_audio)) if _c["audio"] and _audio.exists() else mo.md(""),
+                mo.md(f"> {_c['text']}"),
+                mo.md(f"{_verdict}  \n<small>{_c['address']}</small>"),
+            ]
+        )
+
+    mo.md("") if call_pick is None else mo.vstack(
+        [call_pick, call_panel(demo_calls, call_pick.value, fix_summary)]
+    )
+    return
+
+
+@app.cell
+def _(clock_topic, fix_clock_view, mo):
+    mo.vstack([clock_topic, fix_clock_view])
+    return
+
+
+@app.cell
+def _(fix_calibration, fix_model, mo, pl):
+    _c = {_r["horizon"]: _r for _r in fix_calibration.iter_rows(named=True)}
+    _best = min(_c.values(), key=lambda _r: _r["gap"])
+    _wins = sum(1 for _r in _c.values() if _r["gap"] <= _r["gap_simple"])
+    _rank = max(_c.values(), key=lambda _r: _r["ranking"])
+    mo.accordion(
+        {
+            "How far can you trust these numbers?": mo.vstack(
+                [
+                    mo.md(
+                        f"""
+    The model is a gradient-boosted hazard model: for each request it answers, interval by interval,
+    *given this is still open, does it close now?*, and the answers multiply back into the curve
+    above. It trained on {fix_model["n_train"]:,} request-intervals over {fix_model["rounds"]} rounds,
+    then had its confidence calibrated against {fix_model["n_calib"]:,} more that it had not seen.
+
+    To check it, the whole thing was rebuilt on the early part of the year and scored on the
+    {_best["n"]:,} requests that came later. Across ten bands of predicted risk, the gap between what
+    it said and what happened is **{_best["gap"]:.3f} at {_best["horizon"]} days**, and it beats a
+    plain counting estimate at **{_wins} of {len(_c)}** horizons. Asked instead to rank which
+    requests will still be open, it gets **{_rank["ranking"]:.2f}** at {_rank["horizon"]} days, where
+    0.5 is a coin toss.
+
+    Two honest limits. The city's response *shape* changed partway through the year, becoming slower
+    to acknowledge and then quicker to catch up, and no model can predict a shift it has never seen;
+    the first week is the least reliable stretch because of it. And most of the answer comes from
+    what kind of problem it is, not where it is &mdash; the map sharpens a topic's story rather than
+    telling a separate one.
+    """
+                    ),
+                    mo.ui.table(
+                        fix_calibration.select(
+                            pl.col("horizon").alias("day"), "n",
+                            pl.col("observed").round(3),
+                            pl.col("gap").round(4).alias("gap (model)"),
+                            pl.col("gap_simple").round(4).alias("gap (counting)"),
+                            pl.col("ranking").round(3).alias("ranking within topic"),
+                        ),
+                        selection=None,
+                    ),
+                ]
+            )
+        }
+    )
+    return
+
+
+@app.cell
+def _(BULK_CLOSED, areas, np, pl, requests_311, spearman):
+    def reporting_bias(requests_311, areas):
+        """Does calling 311 more often buy an area faster service?
+
+        The tempting comparison, reporting rate against the share of requests ever closed, is
+        confounded twice over. Topics close at wildly different rates, so an area's topic mix alone
+        moves the number; and "ever closed" counts a request still sitting open as a failure, which
+        is a statement about censoring as much as about service. So we also standardize: predict each
+        area's close rate from its topic mix and citywide topic rates, and correlate the leftover.
+        """
+        _r = requests_311.filter(~pl.col("proactive") & ~pl.col("sr_type").is_in(BULK_CLOSED))
+        _a = (
+            _r.group_by("csa").agg(
+                pl.len().alias("n"),
+                pl.col("closed").is_not_null().mean().alias("close_rate"),
+                (pl.col("closed").is_not_null()
+                 & ((pl.col("closed") - pl.col("created")) <= pl.duration(days=7))).mean().alias("fast_share"),
+            )
+            .join(areas.select("csa", "pop"), on="csa")
+            .with_columns((pl.col("n") / pl.col("pop") * 1000).alias("rate"))
+        )
+        # Indirect standardization: the close rate an area's topic mix alone would predict.
+        _city = _r.group_by("domain").agg(pl.col("closed").is_not_null().mean().alias("_d_rate"))
+        _mix = (
+            _r.group_by("csa", "domain").agg(pl.len().alias("_k"))
+            .with_columns((pl.col("_k") / pl.col("_k").sum().over("csa")).alias("_share"))
+            .join(_city, on="domain")
+            .group_by("csa").agg((pl.col("_share") * pl.col("_d_rate")).sum().alias("expected"))
+        )
+        _a = _a.join(_mix, on="csa").with_columns((pl.col("close_rate") - pl.col("expected")).alias("residual"))
+        return {
+            "naive": spearman(_a["rate"], _a["close_rate"]),
+            "from_mix": spearman(_a["rate"], _a["expected"]),
+            "residual": spearman(_a["rate"], _a["residual"]),
+            "fast": spearman(_a["rate"], _a["fast_share"]),
+            "vacancy": spearman(_a["rate"], areas.join(_a.select("csa"), on="csa")["bnia_vacant_pct"]),
+            "n_areas": _a.height,
+        }
+
+    bias_stats = reporting_bias(requests_311, areas)
+    return (bias_stats,)
+
+
+@app.cell
+def _(bias_stats, mo):
+    mo.callout(
+        mo.md(
+            f"""
+    **Does complaining more get you served faster? No.**
+
+    Areas that report more do have more of their requests closed (rank correlation
+    {bias_stats["naive"]:+.2f}), which looks like a reward for being loud. It is not. Topic mix alone
+    predicts {bias_stats["from_mix"]:+.2f} of it, because the areas that report most report
+    overwhelmingly about street cleaning, which closes almost every time. Take the topic mix out and
+    the advantage is {bias_stats["residual"]:+.2f} &mdash; nothing. On speed rather than eventual
+    closure it points the other way ({bias_stats["fast"]:+.2f} against the share fixed inside a week).
+
+    Reporting rate is not civic engagement, it is a distress signal: it tracks vacancy at
+    {bias_stats["vacancy"]:+.2f}. That is why the clock above is fitted one topic at a time. Comparing
+    areas on a blend of topics compares their problems, not their service.
+    """
+        ),
+        kind="info",
+    )
+    return
+
+
+@app.cell
+def _(fix_summary, mo, pl):
+    clock_topic = mo.ui.dropdown(
+        options=sorted(fix_summary["domain"].unique().to_list()),
+        value="Streetlights",
+        label="**Topic**",
+    )
+    return (clock_topic,)
 
 
 @app.cell
@@ -620,12 +836,36 @@ def _():
     DEFAULT_FIX_DAYS = 7  # at 30 days most sanitation topics are ~100% closed everywhere, so service can't tell areas apart
     ROBUST_SHARE = 0.8  # "robust" = in the top 10 under at least this share of random weightings
 
+    FIX_HORIZON = 180  # days a reported request is followed for before we stop counting
+    FIX_KAPPA = 20.0  # pseudo-count pulling a thin (topic, area) cell toward its topic-wide curve
+    FIX_HALF_LIFE = 60  # days; older requests count for less, because the city's pace drifts
+    # Interval edges for the hazard model. Tight early, where most requests close and a day matters,
+    # widening later, where the question is only whether a thing is still open at all.
+    FIX_EDGES = [0, 1, 2, 3, 5, 7, 10, 14, 21, 30, 45, 60, 90, 120, 180]
+    FIX_CALIB_FROM = "2026-05-01T00:00:00"  # trained before this date, calibrated on what came after
+    FIX_HOLDOUT_FROM = "2026-07-01T00:00:00"  # and scored against requests later than both
+    FIX_CATS = ["domain", "csa", "agency", "method"]
+    FIX_NUMS = ["k", "log_start", "dow", "sla_days", "reports_per_1k", "vacancy", "crime",
+                "parcels_pc", "base_logit"]
+    # Every one of these 4,700 rows closes the instant it opens: a bulk administrative close, not a
+    # same-day repair. Left in, it would make potholes look instant.
+    BULK_CLOSED = ["TRM-Pickup Pothole"]
+
     # Colors: blue = over-served, orange = under-served (colorblind-safe pair).
     OVER, MID, UNDER = "#2b6cb0", "#f1f1f1", "#dd6b20"
     return (
+        BULK_CLOSED,
         DEFAULT_FIX_DAYS,
         DOMAINS_311,
         DOMAIN_ORDER,
+        FIX_HORIZON,
+        FIX_CALIB_FROM,
+        FIX_CATS,
+        FIX_EDGES,
+        FIX_HOLDOUT_FROM,
+        FIX_HALF_LIFE,
+        FIX_KAPPA,
+        FIX_NUMS,
         MID,
         MIN_REQUESTS,
         OVER,
@@ -780,7 +1020,12 @@ def _(
             _raw = pl.DataFrame(
                 fetch_rows(
                     _c, LAYERS["sr311"], f"SRType IN ({_types})",
-                    "SRType,SRStatus,CreatedDate,CloseDate,Latitude,Longitude,Address",
+                    # DueDate is the city's own SLA target, so "late" can be judged against its own
+                    # promise rather than against a cutoff we picked. SRStatus is kept rather than
+                    # only used as a filter: without it a missing CloseDate cannot tell a request
+                    # that is genuinely still open from one that was quietly cancelled.
+                    "SRType,SRStatus,CreatedDate,CloseDate,DueDate,Agency,MethodReceived,"
+                    "Neighborhood,Latitude,Longitude,Address",
                 ),
                 infer_schema_length=None,
             )
@@ -795,9 +1040,14 @@ def _(
                 pl.col("SRType").replace_strict({t: v[1] for t, v in _type_domain.items()}).alias("proactive"),
                 pl.from_epoch("CreatedDate", time_unit="ms").alias("created"),
                 pl.from_epoch("CloseDate", time_unit="ms").alias("closed"),
+                pl.from_epoch(pl.col("DueDate").cast(pl.Int64, strict=False), time_unit="ms").alias("due"),
             )
             _sr_in = _sr.filter(pl.col("csa").is_not_null()).select(
-                "csa", "domain", "proactive", pl.col("SRType").alias("sr_type"), "created", "closed",
+                "csa", "domain", "proactive", pl.col("SRType").alias("sr_type"), "created", "closed", "due",
+                pl.col("SRStatus").alias("status"),
+                pl.col("Agency").str.strip_chars().alias("agency"),  # the layer pads these to fixed width
+                pl.col("MethodReceived").str.strip_chars().alias("method"),
+                pl.col("Neighborhood").str.strip_chars().alias("neighborhood"),
                 pl.col("x", "y").round(5), pl.col("Address").str.strip_chars().alias("address"),
             )
 
@@ -872,7 +1122,7 @@ def _(Path, build_snapshot, json, mo, pl, shapely):
     requests_311 = pl.read_parquet(DATA_DIR / "requests_311.parquet")
     housing = pl.read_parquet(DATA_DIR / "housing.parquet")
     areas = pl.DataFrame([f["properties"] for f in areas_geo["features"]])
-    return areas, areas_geo, housing, requests_311, snapshot_meta
+    return DATA_DIR, areas, areas_geo, housing, requests_311, snapshot_meta
 
 
 @app.cell
@@ -1047,6 +1297,312 @@ def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta
 
 
 @app.cell
+def _(BULK_CLOSED, FIX_HALF_LIFE, FIX_HORIZON, FIX_KAPPA, datetime, np, pl):
+    def fit_fix_clock(requests_311, *, snapshot_ts, horizon=FIX_HORIZON, kappa=FIX_KAPPA,
+                      half_life=FIX_HALF_LIFE):
+        """How long a reported problem stays open, as a curve rather than an average.
+
+        For each topic and area we estimate S(t), the share of requests still open on day t, with a
+        discrete-time hazard on a daily grid:
+
+            h_topic(t) = closed(t) / at_risk(t)                           topic-wide, all 55 areas
+            h_cell(t)  = (closed(t) + kappa * h_topic(t)) / (at_risk(t) + kappa)
+            S_cell(t)  = prod over u <= t of (1 - h_cell(u))
+
+        Averaging how long finished repairs took answers the wrong question, because a request that
+        is never closed never enters the average. Here it stays in the risk set instead, which is why
+        Roads can have no median at all: most road requests are still open when the data ends.
+
+        `kappa` is a pseudo-count, the dial between a per-topic model and a per-area one. At 0 each
+        cell gets its own Kaplan-Meier curve; raised, thin cells fall back on the topic's own history
+        rather than on noise. 141 of the 487 cells hold fewer than 30 requests, so some pooling is
+        not optional. Once a cell's risk set empties, only the kappa terms remain and its curve
+        carries on at the topic's rate.
+
+        Requests are weighted `0.5 ** (age / half_life)` rather than counted once each, because the
+        city's pace drifts: a request from January says less about today than one from August. Held
+        out on the second half of the year, a 60-day half-life cut the day-14 error from 0.070 to
+        0.041 and improved both the Brier score and the between-area signal. See the calibration note
+        under the clock for what it does not fix.
+        """
+        _end = datetime.fromisoformat(snapshot_ts)
+        _r = (
+            requests_311.filter(~pl.col("proactive") & ~pl.col("sr_type").is_in(BULK_CLOSED))
+            .with_columns(
+                ((pl.coalesce("closed", pl.lit(_end)) - pl.col("created")).dt.total_seconds() / 86400)
+                .clip(0.0, None).alias("_dur"),
+                pl.col("closed").is_not_null().alias("_event"),
+            )
+            .with_columns(
+                pl.col("_dur").floor().clip(0, horizon).cast(pl.Int32).alias("_exit"),
+                (pl.col("_event") & (pl.col("_dur") <= horizon)).alias("_event"),
+            )
+        )
+        _cells = _r.select("domain", "csa").unique().sort("domain", "csa")
+        _at = {_k: _i for _i, _k in enumerate(_cells.iter_rows())}
+        _n, _T = len(_at), horizon + 1
+
+        # One flat bincount per grid: exits of any kind, and the subset that were actually closed.
+        _ci = np.array([_at[_k] for _k in _r.select("domain", "csa").iter_rows()])
+        _flat = _ci * _T + _r["_exit"].to_numpy()
+        _w = (
+            0.5 ** ((_end - _r["created"]).dt.total_seconds().to_numpy() / 86400.0 / half_life)
+            if half_life else np.ones(len(_flat))
+        )
+        _ev = _r["_event"].to_numpy()
+        _exits = np.bincount(_flat, weights=_w, minlength=_n * _T).reshape(_n, _T)
+        _events = np.bincount(_flat[_ev], weights=_w[_ev], minlength=_n * _T).reshape(_n, _T)
+        # Weighted counts drive the fit, but a reader is owed the real number of requests.
+        _raw = np.bincount(_ci, minlength=_n).astype(float)
+        _raw_open = _raw - np.bincount(_ci[_ev], minlength=_n)
+        _totals = _exits.sum(axis=1, keepdims=True)
+        _at_risk = _totals - np.concatenate([np.zeros((_n, 1)), np.cumsum(_exits, axis=1)[:, :-1]], axis=1)
+
+        _domains = sorted(set(_cells["domain"].to_list()))
+        _dom_of = np.array([_domains.index(_d) for _d in _cells["domain"]])
+        _dev, _dar = np.zeros((len(_domains), _T)), np.zeros((len(_domains), _T))
+        np.add.at(_dev, _dom_of, _events)
+        np.add.at(_dar, _dom_of, _at_risk)
+        _h_dom = np.divide(_dev, _dar, out=np.zeros_like(_dev), where=_dar > 0)
+
+        _num, _den = _events + kappa * _h_dom[_dom_of], _at_risk + kappa
+        _h = np.divide(_num, _den, out=np.zeros_like(_num), where=_den > 0)
+        return {
+            "days": np.arange(_T),
+            "cells": _cells,
+            "domains": _domains,
+            "dom_of": _dom_of,
+            "S": np.cumprod(1.0 - _h, axis=1),
+            "S_domain": np.cumprod(1.0 - _h_dom, axis=1),
+            "at_risk": _at_risk,
+            "events": _events,
+            "n": _raw,
+            "n_open": _raw_open,
+            "n_effective": _totals.ravel(),
+            "kappa": kappa,
+        }
+
+    def median_days(curves):
+        """First day each curve drops to half still open, or None where it never does."""
+        _hit = np.asarray(curves) <= 0.5
+        return [int(np.argmax(_r)) if _r.any() else None for _r in np.atleast_2d(_hit)]
+
+    return fit_fix_clock, median_days
+
+
+@app.cell
+def _(
+    BULK_CLOSED,
+    FIX_CATS,
+    FIX_EDGES,
+    FIX_HORIZON,
+    FIX_NUMS,
+    HistGradientBoostingClassifier,
+    IsotonicRegression,
+    datetime,
+    fit_fix_clock,
+    np,
+    pl,
+):
+    def fix_features(requests_311, areas, *, snapshot_ts):
+        """One row per resident-reported request, with everything known the moment it was filed."""
+        _end = datetime.fromisoformat(snapshot_ts)
+        _a = areas.with_columns((pl.col("parcels") / pl.col("pop")).alias("parcels_pc"))
+        _r = (
+            requests_311.filter(~pl.col("proactive") & ~pl.col("sr_type").is_in(BULK_CLOSED))
+            .with_columns(
+                ((pl.coalesce("closed", pl.lit(_end)) - pl.col("created")).dt.total_seconds() / 86400)
+                .clip(0.0, None).floor().alias("exit"),
+                pl.col("closed").is_not_null().alias("event"),
+                pl.col("created").dt.weekday().alias("dow"),
+                # The city's own promised turnaround, set when the request is filed. Not an outcome.
+                ((pl.col("due") - pl.col("created")).dt.total_seconds() / 86400).alias("sla_days"),
+            )
+        )
+        _vol = (
+            _r.group_by("csa").agg(pl.len().alias("_n"))
+            .join(_a.select("csa", "pop"), on="csa")
+            .with_columns((pl.col("_n") / pl.col("pop") * 1000).alias("reports_per_1k"))
+        )
+        return _r.join(_vol.select("csa", "reports_per_1k"), on="csa").join(
+            _a.select("csa", vacancy="bnia_vacant_pct", crime="violent_crime_rate", parcels_pc="parcels_pc"),
+            on="csa",
+        )
+
+    def _baseline(train_raw, snapshot_ts):
+        """Counting-model hazard per (topic, area, interval), handed to the model as a starting point."""
+        _f = fit_fix_clock(train_raw, snapshot_ts=snapshot_ts)
+        _S = _f["S"]
+        _edge = np.column_stack([_S[:, min(_e, _S.shape[1] - 1)] for _e in FIX_EDGES])
+        _h = 1 - np.divide(_edge[:, 1:], np.maximum(_edge[:, :-1], 1e-9))
+        return {_k: _i for _i, _k in enumerate(_f["cells"].iter_rows())}, np.clip(_h, 1e-6, 1 - 1e-6)
+
+    def _grid(r, idx, H, *, with_label):
+        """Explode requests into one row per interval they were still open for.
+
+        This is what makes censoring a non-issue: a request that is still open simply stops
+        producing rows, rather than being dropped from the data or counted as fixed.
+        """
+        _K = len(FIX_EDGES) - 1
+        _g = (
+            r.with_columns(k=pl.lit(list(range(_K)), dtype=pl.List(pl.Int32))).explode("k")
+            .with_columns(
+                pl.col("k").replace_strict({_i: float(FIX_EDGES[_i]) for _i in range(_K)}).alias("start"),
+                pl.col("k").replace_strict({_i: float(FIX_EDGES[_i + 1]) for _i in range(_K)}).alias("stop"),
+            )
+        )
+        if with_label:
+            _g = _g.filter(pl.col("exit") >= pl.col("start")).with_columns(
+                (pl.col("event") & (pl.col("exit") < pl.col("stop"))).cast(pl.Int8).alias("y")
+            )
+        _g = _g.with_columns((pl.col("start") + 1).log().alias("log_start"))
+        _keys = list(_g.select("domain", "csa").iter_rows())
+        _hb = np.array([H[idx[_q]][_k] if _q in idx else 0.2 for _q, _k in zip(_keys, _g["k"].to_numpy())])
+        return _g.with_columns(pl.Series("base_logit", np.log(_hb / (1 - _hb))))
+
+    def _matrix(g, codes):
+        """Categoricals as integer codes; anything unseen becomes a missing value the model handles."""
+        _cols = [np.array([codes[_c].get(_v, np.nan) for _v in g[_c]], dtype=float) for _c in FIX_CATS]
+        _cols += [g[_c].cast(pl.Float64).fill_null(np.nan).to_numpy() for _c in FIX_NUMS]
+        return np.column_stack(_cols)
+
+    def train_fix_model(requests_311, areas, *, snapshot_ts, calib_from, seed=2026):
+        """Gradient-boosted hazard, then isotonic calibration on a slice it was not trained on.
+
+        The classifier answers one question per interval: given this request is still open, does it
+        close now? Multiplying the answers back together gives the survival curve. Boosting is what
+        lets it use per-request facts a per-area average cannot -- the SLA clock the city set, which
+        agency owns it, how it came in -- and that is where nearly all of the accuracy comes from.
+
+        Calibrating on later requests than it trained on matters because sharpness and honesty are
+        different things: the raw scores rank requests well but overstate their confidence.
+        """
+        _cal = datetime.fromisoformat(calib_from)
+        _early = requests_311.filter(pl.col("created") < _cal).with_columns(
+            pl.when(pl.col("closed") >= _cal).then(None).otherwise(pl.col("closed")).alias("closed")
+        )
+        _idx, _H = _baseline(_early, calib_from)
+        _rf = fix_features(_early, areas, snapshot_ts=calib_from)
+        _train = _grid(_rf, _idx, _H, with_label=True)
+        _codes = {_c: {_v: _i for _i, _v in enumerate(sorted(_train[_c].unique().to_list()))} for _c in FIX_CATS}
+
+        _model = HistGradientBoostingClassifier(
+            max_iter=400, learning_rate=0.06, max_leaf_nodes=31, min_samples_leaf=30,
+            l2_regularization=1.0, categorical_features=list(range(len(FIX_CATS))),
+            random_state=seed, early_stopping=True, validation_fraction=0.15,
+        ).fit(_matrix(_train, _codes), _train["y"].to_numpy())
+
+        _rc = fix_features(requests_311.filter(pl.col("created") >= _cal), areas, snapshot_ts=snapshot_ts)
+        _cg = _grid(_rc, _idx, _H, with_label=True)
+        _iso = IsotonicRegression(out_of_bounds="clip", y_min=1e-6, y_max=1 - 1e-6).fit(
+            _model.predict_proba(_matrix(_cg, _codes))[:, 1], _cg["y"].to_numpy()
+        )
+        return {"model": _model, "iso": _iso, "codes": _codes, "idx": _idx, "H": _H,
+                "n_train": _train.height, "n_calib": _cg.height, "rounds": int(_model.n_iter_)}
+
+    def predict_fix_curves(bundle, r, *, horizon=FIX_HORIZON):
+        """S(t) per request: the chance it is still open on day t."""
+        _K = len(FIX_EDGES) - 1
+        _g = _grid(r, bundle["idx"], bundle["H"], with_label=False)
+        _h = bundle["iso"].predict(
+            bundle["model"].predict_proba(_matrix(_g, bundle["codes"]))[:, 1]
+        ).reshape(r.height, _K)
+        _days = np.arange(horizon + 1)
+        _S = np.ones((r.height, horizon + 1))
+        _prev = np.ones(r.height)
+        for _i in range(_K):
+            _lo, _hi = FIX_EDGES[_i], FIX_EDGES[_i + 1]
+            _sel = (_days > _lo) & (_days <= _hi)
+            # Spread each interval's survival across its days so the curve reads smoothly.
+            _S[:, _sel] = _prev[:, None] * (1 - _h[:, [_i]]) ** ((_days[_sel] - _lo) / (_hi - _lo))
+            _prev = _prev * (1 - _h[:, _i])
+        return _S
+
+    return fix_features, predict_fix_curves, train_fix_model
+
+
+@app.cell
+def _(
+    FIX_CALIB_FROM,
+    datetime,
+    fit_fix_clock,
+    fix_features,
+    np,
+    pl,
+    predict_fix_curves,
+    train_fix_model,
+):
+    def calibration_check(requests_311, areas, *, snapshot_ts, cutoff, horizons=(3, 7, 14, 30), bins=10):
+        """Score the model against requests filed after it was built, and against a simpler rival.
+
+        Splitting by date rather than at random matters: a random split would let the model see how
+        the very requests it is tested on turned out. Anything closed after the cutoff is hidden too,
+        so a request that closed in August enters training as still open, the way it looked on the
+        day. `gap` is the average distance between predicted and observed across ten bands of
+        predicted risk. `gap_simple` is the same for a plain counting estimate, which is the thing
+        the trained model has to beat to earn its place.
+        """
+        _cut, _end = datetime.fromisoformat(cutoff), datetime.fromisoformat(snapshot_ts)
+        _past = requests_311.filter(pl.col("created") < _cut).with_columns(
+            pl.when(pl.col("closed") >= _cut).then(None).otherwise(pl.col("closed")).alias("closed")
+        )
+        _bundle = train_fix_model(_past, areas, snapshot_ts=cutoff, calib_from=FIX_CALIB_FROM)
+        _later = requests_311.filter(pl.col("created") >= _cut)
+        _te = fix_features(_later, areas, snapshot_ts=snapshot_ts).with_columns(
+            ((_end - pl.col("created")).dt.total_seconds() / 86400).alias("room")
+        )
+        _ml = predict_fix_curves(_bundle, _te)
+
+        _simple = fit_fix_clock(_past, snapshot_ts=cutoff)
+        _at = {_k: _i for _i, _k in enumerate(_simple["cells"].iter_rows())}
+        _keys = list(_te.select("domain", "csa").iter_rows())
+        _sv = np.array([_simple["S"][_at[_k]] if _k in _at else np.full(_ml.shape[1], np.nan) for _k in _keys])
+        _room, _exit = _te["room"].to_numpy(), _te["exit"].to_numpy()
+
+        def _gap(_p, _o):
+            _ok = ~np.isnan(_p)
+            _p, _o = _p[_ok], _o[_ok]
+            _order = np.argsort(_p)
+            return sum(len(_b) * abs(_p[_b].mean() - _o[_b].mean())
+                       for _b in np.array_split(_order, bins) if len(_b)) / max(len(_p), 1)
+
+        def _auc(_o, _p):
+            _ok = ~np.isnan(_p)
+            _o, _p = _o[_ok], _p[_ok]
+            if _o.min() == _o.max():
+                return float("nan")
+            _r = _p.argsort().argsort() + 1.0
+            _n1 = _o.sum()
+            return float((_r[_o == 1].sum() - _n1 * (_n1 + 1) / 2) / (_n1 * (len(_o) - _n1)))
+
+        _dom = np.array([_k[0] for _k in _keys])
+        _rows = []
+        for _t in horizons:
+            _sel = _room >= _t
+            _o = (_exit[_sel] > _t).astype(float)
+            # Ranking is judged inside a topic, where the topic curve is a constant and only the
+            # request's own circumstances can tell one case from another.
+            _a, _w = [], []
+            for _d in np.unique(_dom):
+                _s2 = _sel & (_dom == _d)
+                _o2 = (_exit[_s2] > _t).astype(float)
+                if len(_o2) < 50 or _o2.min() == _o2.max():
+                    continue
+                _v = _auc(_o2, _ml[_s2, _t])
+                if not np.isnan(_v):
+                    _a.append(_v)
+                    _w.append(len(_o2))
+            _rows.append({
+                "horizon": _t, "n": int(_sel.sum()), "observed": float(_o.mean()),
+                "gap": _gap(_ml[_sel, _t], _o), "gap_simple": _gap(_sv[_sel, _t], _o),
+                "ranking": float(np.average(_a, weights=_w)) if _a else float("nan"),
+            })
+        return pl.DataFrame(_rows)
+
+    return (calibration_check,)
+
+
+@app.cell
 def _(ROBUST_SHARE, np, pl):
     def rank_stability(domain_scores, n_samples=2000, top_k=10, seed=2026):
         """Rank areas under many random topic weightings; report how often each lands in the top k."""
@@ -1106,6 +1662,86 @@ def _(
     default_overall = summarize(default_scores, {d: 1 for d in DOMAIN_ORDER})
     default_robust = rank_stability(default_scores)
     return default_overall, default_robust, default_scores
+
+
+@app.cell
+def _(
+    FIX_CALIB_FROM,
+    areas,
+    fix_features,
+    median_days,
+    np,
+    pl,
+    predict_fix_curves,
+    requests_311,
+    snapshot_meta,
+    train_fix_model,
+):
+    # Trained once against the snapshot, never on the slider path: the sliders re-slice these curves,
+    # they never retrain. Takes a few seconds.
+    fix_model = train_fix_model(
+        requests_311, areas, snapshot_ts=snapshot_meta["snapshot_ts"], calib_from=FIX_CALIB_FROM
+    )
+    _r = fix_features(requests_311, areas, snapshot_ts=snapshot_meta["snapshot_ts"])
+    _per_request = predict_fix_curves(fix_model, _r)
+
+    # The map needs one curve per area, so average the requests that actually landed there.
+    _cells = _r.select("domain", "csa").unique().sort("domain", "csa")
+    _at = {_k: _i for _i, _k in enumerate(_cells.iter_rows())}
+    _ci = np.array([_at[_k] for _k in _r.select("domain", "csa").iter_rows()])
+    _counts = np.bincount(_ci, minlength=_cells.height).astype(float)
+    _S = np.zeros((_cells.height, _per_request.shape[1]))
+    np.add.at(_S, _ci, _per_request)
+    _S = _S / np.maximum(_counts[:, None], 1)
+    _open = np.bincount(_ci[~_r["event"].to_numpy()], minlength=_cells.height)
+
+    fix_clock = {"cells": _cells, "S": _S, "n": _counts, "n_open": _open.astype(float),
+                 "per_request": _per_request}
+    fix_summary = _cells.with_columns(
+        pl.Series("n", fix_clock["n"]).cast(pl.Int64),
+        pl.Series("n_open", fix_clock["n_open"]).cast(pl.Int64),
+        pl.Series("median_days", median_days(_S), dtype=pl.Int64),
+        pl.Series("fixed_by_7", 1 - _S[:, 7]),
+        pl.Series("fixed_by_30", 1 - _S[:, 30]),
+        pl.Series("fixed_by_90", 1 - _S[:, 90]),
+        pl.Series("still_open_at_horizon", _S[:, -1]),
+    )
+
+    # Topic-wide curves, each area weighted by how many requests it contributed.
+    _domains = sorted(_cells["domain"].unique().to_list())
+    _SD = np.array([
+        np.average(_S[(_cells["domain"] == _d).to_numpy()], axis=0,
+                   weights=np.maximum(_counts[(_cells["domain"] == _d).to_numpy()], 1e-9))
+        for _d in _domains
+    ])
+    fix_topics = pl.DataFrame({"domain": _domains}).with_columns(
+        pl.Series("median_days", median_days(_SD), dtype=pl.Int64),
+        pl.Series("fixed_by_7", 1 - _SD[:, 7]),
+        pl.Series("fixed_by_30", 1 - _SD[:, 30]),
+        pl.Series("still_open_at_horizon", _SD[:, -1]),
+        pl.Series("n", [float(_counts[(_cells["domain"] == _d).to_numpy()].sum()) for _d in _domains]).cast(pl.Int64),
+    ).sort("still_open_at_horizon", descending=True)
+
+    # Naive comparison: the median of only those requests that did close, which is what an average
+    # over finished repairs would report.
+    _naive = (
+        requests_311.filter(~pl.col("proactive") & pl.col("closed").is_not_null())
+        .filter(~pl.col("sr_type").is_in(["TRM-Pickup Pothole"]))
+        .with_columns(((pl.col("closed") - pl.col("created")).dt.total_seconds() / 86400).clip(0.0, None).alias("d"))
+        .group_by("domain").agg(pl.col("d").median().alias("naive_median_days"))
+    )
+    fix_topics = fix_topics.join(_naive, on="domain", how="left")
+    return fix_clock, fix_model, fix_summary, fix_topics
+
+
+@app.cell
+def _(FIX_HOLDOUT_FROM, areas, calibration_check, requests_311, snapshot_meta):
+    # Rebuilt on the early part of the year and scored on the rest, so the clock is judged on
+    # requests it never saw.
+    fix_calibration = calibration_check(
+        requests_311, areas, snapshot_ts=snapshot_meta["snapshot_ts"], cutoff=FIX_HOLDOUT_FROM
+    )
+    return (fix_calibration,)
 
 
 @app.cell
@@ -1484,6 +2120,172 @@ def _(anywidget, traitlets):
 
 
 @app.cell
+def _(anywidget, traitlets):
+    class FixClock(anywidget.AnyWidget):
+        """A countdown map: every area shaded by the share of its requests still open on day t.
+
+        Deliberately a second widget rather than an extension of TriageExplorer, whose click-and-zoom
+        contract round-trips through marimo's graph. Nothing here writes back to Python: the playhead
+        lives in JavaScript, so a playing animation cannot trigger a re-execution on every frame.
+        """
+
+        _esm = r"""
+        const UNDER = [221, 107, 32];
+
+        function render({ model, el }) {
+          const [W, H] = model.get("size");
+          el.innerHTML = `
+            <div class="fc-wrap">
+              <div class="fc-head">
+                <div>
+                  <div class="fc-day">Day <b class="fc-t">0</b></div>
+                  <div class="fc-topic"></div>
+                </div>
+                <div class="fc-readout"></div>
+              </div>
+              <svg class="fc-map" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+                <g class="fc-areas"></g>
+              </svg>
+              <div class="fc-ctrl">
+                <button class="fc-play" title="Play or pause">&#9654;</button>
+                <input class="fc-scrub" type="range" min="0" value="0" step="1">
+                <select class="fc-speed">
+                  <option value="60">1 day / sec</option>
+                  <option value="12" selected>5 days / sec</option>
+                  <option value="4">15 days / sec</option>
+                </select>
+              </div>
+              <div class="fc-legend">
+                <span>all fixed</span><span class="fc-grad"></span><span>all still open</span>
+                <span class="fc-hint">hover an area</span>
+              </div>
+            </div>`;
+
+          const svg = el.querySelector(".fc-map"), gAreas = el.querySelector(".fc-areas");
+          const elT = el.querySelector(".fc-t"), elTopic = el.querySelector(".fc-topic");
+          const elRead = el.querySelector(".fc-readout"), elHint = el.querySelector(".fc-hint");
+          const btn = el.querySelector(".fc-play"), scrub = el.querySelector(".fc-scrub");
+          const speed = el.querySelector(".fc-speed");
+
+          let t = 0, playing = false, anim = null, last = 0, hovered = null;
+          const paths = {};
+          for (const sh of model.get("shapes")) {
+            const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            p.setAttribute("d", sh.d);
+            p.setAttribute("class", "fc-area");
+            p.addEventListener("mouseenter", () => { hovered = sh.csa; paint(); });
+            p.addEventListener("mouseleave", () => { hovered = null; paint(); });
+            gAreas.appendChild(p);
+            paths[sh.csa] = p;
+          }
+
+          const horizon = () => model.get("horizon");
+          const curveOf = (csa) => (model.get("curves") || {})[csa];
+          // Stored as 0-100 integers to keep the payload small; back to a share here.
+          const sAt = (csa, day) => {
+            const c = curveOf(csa);
+            return c ? c[Math.min(day, c.length - 1)] / 100 : null;
+          };
+
+          const paint = () => {
+            elT.textContent = t;
+            scrub.value = t;
+            let num = 0, den = 0;
+            for (const [csa, p] of Object.entries(paths)) {
+              const s = sAt(csa, t);
+              if (s === null) { p.setAttribute("fill", "url(#fc-na)"); continue; }
+              p.setAttribute("fill", `rgba(${UNDER.join(",")},${(0.06 + 0.94 * s).toFixed(3)})`);
+              const n = (model.get("labels")[csa] || {}).n || 0;
+              num += s * n; den += n;
+            }
+            for (const [csa, p] of Object.entries(paths)) p.classList.toggle("fc-hov", csa === hovered);
+            elRead.innerHTML = den
+              ? `<b>${Math.round(100 * num / den)}%</b> still open citywide`
+              : "";
+            if (hovered) {
+              const lab = model.get("labels")[hovered] || {};
+              const s = sAt(hovered, t);
+              const med = lab.median === null || lab.median === undefined ? "never reaches half" : `half gone by day ${lab.median}`;
+              elHint.innerHTML = `<b>${hovered}</b> &mdash; ${s === null ? "not enough requests" : Math.round(100 * s) + "% still open"} &middot; ${med} &middot; n=${lab.n || 0}`;
+            } else {
+              elHint.textContent = "hover an area";
+            }
+          };
+
+          const step = (now) => {
+            if (!playing) return;
+            const perDay = Number(speed.value);
+            if (now - last >= perDay) {
+              const adv = Math.max(1, Math.floor((now - last) / perDay));
+              last = now;
+              t = t + adv;
+              if (t >= horizon()) { t = horizon(); setPlaying(false); paint(); return; }
+              paint();
+            }
+            anim = requestAnimationFrame(step);
+          };
+
+          const setPlaying = (v) => {
+            playing = v;
+            btn.innerHTML = v ? "&#10073;&#10073;" : "&#9654;";
+            cancelAnimationFrame(anim);
+            if (v) { last = performance.now(); anim = requestAnimationFrame(step); }
+          };
+
+          btn.addEventListener("click", () => {
+            if (!playing && t >= horizon()) t = 0;   // replay from the top
+            setPlaying(!playing);
+          });
+          scrub.addEventListener("input", () => { setPlaying(false); t = Number(scrub.value); paint(); });
+          speed.addEventListener("change", () => { last = performance.now(); });
+
+          const reset = () => {
+            scrub.max = horizon();
+            elTopic.textContent = model.get("topic");
+            t = 0; setPlaying(false); paint();
+          };
+          model.on("change:curves", reset);
+          model.on("change:topic", reset);
+          reset();
+          return () => cancelAnimationFrame(anim);
+        }
+        export default { render };
+        """
+
+        _css = r"""
+        .fc-wrap { font: 13px system-ui, -apple-system, sans-serif; }
+        .fc-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
+        .fc-day { font-size: 15px; color: #666; }
+        .fc-day b { font-size: 26px; color: #dd6b20; font-variant-numeric: tabular-nums; }
+        .fc-topic { color: #888; font-size: 12px; }
+        .fc-readout { font-size: 13px; color: #666; }
+        .fc-readout b { font-size: 18px; color: #dd6b20; font-variant-numeric: tabular-nums; }
+        .fc-map { width: 100%; height: auto; display: block; }
+        .fc-area { stroke: rgba(127,127,127,0.45); stroke-width: 0.6; }
+        .fc-area.fc-hov { stroke: #2d3748; stroke-width: 2.5; }
+        .fc-ctrl { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+        .fc-play { width: 32px; height: 28px; cursor: pointer; border: 1px solid rgba(127,127,127,0.4);
+                   border-radius: 4px; background: transparent; color: inherit; font-size: 12px; }
+        .fc-play:hover { border-color: #dd6b20; color: #dd6b20; }
+        .fc-scrub { flex: 1; accent-color: #dd6b20; }
+        .fc-speed { border: 1px solid rgba(127,127,127,0.4); border-radius: 4px; padding: 3px;
+                    background: transparent; color: inherit; font-size: 12px; }
+        .fc-legend { display: flex; align-items: center; gap: 6px; margin-top: 6px; color: #888; font-size: 11px; }
+        .fc-grad { width: 90px; height: 9px; border-radius: 2px;
+                   background: linear-gradient(90deg, rgba(221,107,32,0.06), rgb(221,107,32)); }
+        .fc-hint { margin-left: auto; }
+        """
+
+        shapes = traitlets.List([]).tag(sync=True)
+        size = traitlets.List([1000, 1000]).tag(sync=True)
+        curves = traitlets.Dict({}).tag(sync=True)
+        labels = traitlets.Dict({}).tag(sync=True)
+        topic = traitlets.Unicode("").tag(sync=True)
+        horizon = traitlets.Int(180).tag(sync=True)
+    return (FixClock,)
+
+
+@app.cell
 def _(MAP_SIZE, TriageExplorer, default_overall, map_shapes, mo):
     # Created once, so the selection survives slider moves. Scores and dots are pushed in by the cells below.
     # `?area=Cherry Hill` in the URL opens the app on that area (read once, never re-triggers this cell).
@@ -1495,6 +2297,35 @@ def _(MAP_SIZE, TriageExplorer, default_overall, map_shapes, mo):
     )
     explorer = mo.ui.anywidget(triage_widget)
     return explorer, triage_widget
+
+
+@app.cell
+def _(FIX_HORIZON, FixClock, MAP_SIZE, map_shapes, mo):
+    # Created once, like the gap map above; curves are pushed in by the cell below.
+    clock_widget = FixClock(shapes=map_shapes, size=MAP_SIZE, horizon=FIX_HORIZON)
+    fix_clock_view = mo.ui.anywidget(clock_widget)
+    return clock_widget, fix_clock_view
+
+
+@app.cell
+def _(clock_topic, clock_widget, fix_clock, fix_summary, np, pl):
+    # Pushed through the raw widget handle, never through the mo.ui wrapper: assigning a trait this
+    # way reaches the browser without marking this cell dirty, so there is no reactive loop.
+    _rows = fix_summary.filter(pl.col("domain") == clock_topic.value)
+    _idx = {(_d, _c): _i for _i, (_d, _c) in enumerate(fix_clock["cells"].iter_rows())}
+    _S = fix_clock["S"]
+
+    # 0-100 integers rather than floats: 55 areas x 181 days lands around 10 KB of JSON, well inside
+    # marimo's output size limit.
+    clock_widget.curves = {
+        _r["csa"]: np.rint(_S[_idx[(clock_topic.value, _r["csa"])]] * 100).astype(int).tolist()
+        for _r in _rows.iter_rows(named=True)
+    }
+    clock_widget.labels = {
+        _r["csa"]: {"n": _r["n"], "median": _r["median_days"]} for _r in _rows.iter_rows(named=True)
+    }
+    clock_widget.topic = f"{clock_topic.value} - resident-reported requests"
+    return
 
 
 @app.cell
