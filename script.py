@@ -2775,11 +2775,18 @@ def _(
         ]
 
     def storm_clips(data_dir):
-        """Audio as base64 data URIs: the only transport that survives both run and static export."""
+        """Audio as base64 data URIs: the only transport that survives both run and static export.
+
+        Only the clips this sequence actually fires. The call panel above has its own, larger
+        recordings, and shipping those here would put a few hundred kilobytes on the wire for
+        audio that never plays.
+        """
         _d = data_dir / "demo_call"
+        _want = lambda _f: _f.stem == "premise" or _f.stem.startswith("issue_")
         return {
             _f.stem: "data:audio/mpeg;base64," + base64.b64encode(_f.read_bytes()).decode()
             for _f in (sorted(_d.glob("*.mp3")) if _d.exists() else [])
+            if _want(_f)
         }
 
     _rows = fix_summary.filter(

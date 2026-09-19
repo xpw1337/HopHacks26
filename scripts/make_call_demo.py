@@ -194,6 +194,7 @@ def main():
                 mp3 = synthesize(client, api_key, args.voice, call["text"])
                 if mp3:
                     path.write_bytes(mp3)
+                    compress(path)
                     audio = name
             records.append({"id": i, **call, "audio": audio})
         if api_key:
