@@ -12,6 +12,13 @@ The notebook ships with no opinion about which problem matters most. Officials s
 
 **What a judge sees in 30 seconds:** a map of Baltimore colored by neglect gap, sliders that visibly move the ranking, and a short table of the areas that refuse to leave the top 10.
 
+> **What changed while building (2026-09-19).** Where this plan and `script.py` disagree, the code wins.
+> - **It's a web app now, not just a notebook.** Run `uvx marimo run --sandbox script.py`: code hidden, hero header, and a sidebar holding the section links and all the controls, which stays on screen while you scroll.
+> - **We built our own map widget.** marimo can't click Altair maps, so the "Triage Explorer" (anywidget, plain SVG) holds the map and the Gap Card. Click an area to zoom to its streets, where every dot is a real request or vacant building. Click a Gap Card row to color the map by that topic. A **work list** below shows the oldest still-open requests, with addresses and a CSV. `?area=` links open the app on an area.
+> - **Settings:** fast fix = **7 days** by default (at 30 days most sanitation topics are ~100% closed everywhere). "Robust" = in the top 10 under **80%** of 2,000 random weightings (at 90% almost nothing qualifies).
+> - **Dropped:** geopandas (shapely alone does the point-in-area work), Impact Investment Areas (no usable layer found), pydeck, 911 data.
+> - "Quiet but bad" uses **vacancy only**. Violent crime per resident is extreme where few people live, which flagged Downtown and Harbor East.
+
 ## Rubric checklist (how we get scored)
 
 Source: `dsai_marimo_track_guideline_for_hackers.pdf`. Check every box before submitting.
@@ -211,15 +218,14 @@ This converts the standard weakness of composite indices into the central featur
 
 ### Geospatial
 
-- **geopandas** and **shapely** for point-in-polygon joins of 311 and 911 records into areas.
+- **shapely** for point-in-polygon joins of 311 and housing records into areas (geopandas turned out to be unnecessary).
 - Community Statistical Area boundaries from Open Baltimore.
 
 ### Visualization
 
-- **Altair**, driven through `mo.ui.altair_chart`, for the choropleth and every linked chart. Chosen deliberately: marimo gives Altair two-way selection, so clicking an area on the map returns that selection to Python as a dataframe, which then drives every other panel. That is the cleanest available demonstration of the reactive model.
-- **pydeck** for an optional 3D extruded view where height is need and color is service. Nice, not necessary.
+- **Altair** for the scatter, robust top 10, quiet-areas and method-check charts. (Plan was an Altair choropleth with click selection, but marimo 0.24.2 disables selection on geoshape charts, so the map became our own widget, below.)
 
-### The custom widget: the Gap Card
+### The custom widget: the Gap Card (now inside the "Triage Explorer" map widget)
 
 Built with **anywidget**. For the selected area it draws one row per domain, each row a dumbbell showing the need percentile and the service percentile as two points with the gap drawn between them, sorted widest gap first, diverging color by gap direction.
 

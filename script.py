@@ -15,7 +15,7 @@
 import marimo
 
 __generated_with = "0.24.2"
-app = marimo.App(width="medium", app_title="Baltimore Triage")
+app = marimo.App(width="medium", app_title="Baltimore Triage", css_file="app.css")
 
 
 @app.cell
@@ -51,12 +51,35 @@ def _():
 
 
 @app.cell
-def _(mo):
-    mo.md(r"""
-    # Baltimore Triage: what to fix next
-
-    **Most city dashboards show where things are bad. This one shows where things are bad *and the city is not responding*.**
-    """)
+def _(default_overall, default_robust, mo, requests_311, snapshot_meta):
+    _c = snapshot_meta["counts"]
+    _open = requests_311.filter(requests_311["closed"].is_null() & ~requests_311["proactive"]).height
+    _robust = default_robust.filter(default_robust["verdict"] == "Robust").height
+    mo.vstack(
+        [
+            mo.Html(
+                """
+                <div class="hero">
+                  <p class="hero-eyebrow">Open Baltimore · 55 Community Statistical Areas · 2026</p>
+                  <h1>Baltimore Triage: what to fix next</h1>
+                  <p class="hero-lede">Most city dashboards show where things are bad. This one shows where things
+                  are bad <em>and the city is not responding</em>, down to the street address.</p>
+                </div>
+                """
+            ),
+            mo.hstack(
+                [
+                    mo.stat(f"{_c['requests_311'] + _c['open_notices'] + _c['rehabs'] + _c['demolitions']:,}", label="City records joined", caption="311 + vacant building files", bordered=True),
+                    mo.stat(f"{_open:,}", label="Resident requests still open", caption=f"as of {snapshot_meta['snapshot_date']}", bordered=True),
+                    mo.stat(default_overall["csa"][0], label="Widest gap, equal weights", caption="#1 of 55 areas", bordered=True),
+                    mo.stat(f"{_robust}", label="Robust top-10 areas", caption="hold up under any weighting", bordered=True),
+                ],
+                widths="equal",
+                gap=1,
+            ),
+        ],
+        gap=1,
+    )
     return
 
 
@@ -176,7 +199,8 @@ def _(mo, snapshot_meta):
     _table = "\n".join(f"| {a} | {b} | {c} |" for a, b, c in _rows)
     mo.md(f"""
     We join **9 Open Baltimore datasets**, by parcel number and by location. Every 311 request and every
-    housing record is placed inside one of the 55 areas by its map point.
+    housing record is placed inside one of the 55 areas by its map point. We keep each point and street
+    address, so the map can zoom from the whole city down to a single block.
 
     | Dataset | Records used | What it gives us |
     | --- | --- | --- |
@@ -211,9 +235,17 @@ def _(mo):
     mo.md(r"""
     ## Core visualization
 
-    **Move a slider. Watch the map change. Click a dot in the chart on the right to pick an area.**
-    The weights are yours. The notebook does not decide which problem matters most.
+    **Click an area to zoom in to its streets.** Each dot is a real request or vacant building: orange
+    dots are still open, and bigger means older. **Click a topic in the Gap Card** to color the map by that
+    topic alone. **Move the sliders in the sidebar** to change what matters. The weights are yours; the
+    notebook does not decide which problem matters most.
     """)
+    return
+
+
+@app.cell
+def _(explorer):
+    explorer
     return
 
 
@@ -240,72 +272,105 @@ def _(DEFAULT_FIX_DAYS, DOMAIN_ORDER, mo):
 
 @app.cell
 def _(DOMAIN_ORDER, fix_days, mo, per, weight_sliders, window):
+    # The sidebar stays on screen while you scroll, so every chart below can be re-weighted in place.
     _weight_rows = [
-        mo.hstack([mo.md(d), weight_sliders[d]], widths=[2, 3], align="center") for d in DOMAIN_ORDER
+        mo.hstack([mo.md(f"<small>{d}</small>"), weight_sliders[d]], widths=[1, 1], align="center") for d in DOMAIN_ORDER
     ]
-    mo.hstack(
+    mo.sidebar(
         [
-            mo.vstack([mo.md("**Topic weights** (0 = ignore)"), *_weight_rows], gap=0.25),
-            mo.vstack(
-                [
-                    mo.md("**What counts**"),
-                    fix_days,
-                    window,
-                    per,
-                    mo.md(
-                        "<small>Vacant buildings always use parcels, and count rehabs and demolitions since Jan 2023.</small>"
-                    ),
-                ],
-                gap=0.75,
+            mo.md("### Baltimore Triage"),
+            # Plain "#section" links, not mo.nav_menu: nav_menu links to "/#section", which drops the
+            # "?area=" query and reloads the whole app.
+            mo.Html(
+                '<nav class="side-nav">'
+                + "".join(
+                    f'<a href="#{anchor}">{label}</a>'
+                    for anchor, label in [
+                        ("executive-summary", "Summary"),
+                        ("problem-statement", "Problem"),
+                        ("data-overview", "Data"),
+                        ("core-visualization", "Explore the map"),
+                        ("insight-synthesis", "Insights"),
+                        ("discussion-future-work", "Discussion"),
+                        ("marimo-feedback", "marimo feedback"),
+                        ("agentic-tool-usage-what-we-learned", "AI tool notes"),
+                    ]
+                )
+                + "</nav>"
             ),
+            mo.md("---\n**What counts**"),
+            fix_days,
+            window,
+            per,
+            mo.md("**Topic weights** <small>(0 = ignore)</small>"),
+            *_weight_rows,
+            mo.md("<small>Vacant buildings always use parcels, and count rehabs and demolitions since Jan 2023.</small>"),
         ],
-        widths=[1, 1],
-        gap=2,
+        width="330px",
     )
     return
 
 
 @app.cell
-def _(area_names, default_overall, mo):
-    area_pick = mo.ui.dropdown(
-        options=area_names,
-        value=default_overall["csa"][0],
-        label="Or pick an area",
-        searchable=True,
-    )
-    return (area_pick,)
-
-
-@app.cell
-def _(gap_map, mo, quadrant):
-    mo.hstack([gap_map, quadrant], widths=[1, 1], align="start")
-    return
-
-
-@app.cell
-def _(area_pick, mo, selected_area, selected_source):
-    mo.hstack(
-        [
-            area_pick,
-            mo.md(f"Showing **{selected_area}** <small>({selected_source})</small>"),
-        ],
-        justify="start",
-        gap=2,
-    )
-    return
-
-
-@app.cell
-def _(gap_card, mo):
+def _(area_reqs, area_vac, focus_topic, mo, pl, selected_area, snapshot_meta, VACANCY):
+    if focus_topic == VACANCY:
+        _list = (
+            area_vac.filter(~pl.col("handled"))
+            .sort("notice_date")
+            .select(
+                pl.col("address").alias("Address"),
+                pl.col("notice_date").dt.strftime("%b %Y").alias("Vacant notice since"),
+            )
+        )
+        _what = "vacant buildings with no rehab permit or demolition since 2023, oldest notice first"
+    else:
+        _list = (
+            area_reqs.filter(pl.col("status") == "open")
+            .sort("days", descending=True)
+            .select(
+                pl.col("domain").alias("Topic"),
+                pl.col("address").alias("Address"),
+                pl.col("created").dt.strftime("%Y-%m-%d").alias("Reported"),
+                pl.col("days").alias("Days open"),
+                pl.col("sr_type").alias("311 type"),
+            )
+        )
+        _what = f"still-open {focus_topic.lower() + ' ' if focus_topic else ''}311 requests, oldest first"
     mo.vstack(
         [
             mo.md(
-                "### Gap Card: what to send\n"
-                "One row per topic for the chosen area, widest gap first. "
-                "Filled dot = need, hollow dot = service. **Click a row** to color the map by that topic only."
+                f"### Work list: {selected_area}\n"
+                f"{_list.height:,} {_what} (as of {snapshot_meta['snapshot_date']}). "
+                "This is what a crew would get. Pick another area or topic on the map to change it."
             ),
-            gap_card,
+            mo.ui.table(_list, selection=None, page_size=8, show_column_summaries=False),
+            mo.download(
+                data=_list.write_csv().encode("utf-8"),
+                filename=f"work_list_{selected_area.replace('/', '-')}.csv",
+                mimetype="text/csv",
+                label="Download this work list (CSV)",
+            ),
         ]
+    )
+    return
+
+
+@app.cell
+def _(mo, quadrant):
+    mo.hstack(
+        [
+            quadrant,
+            mo.md(
+                "### Need vs service, all 55 areas\n"
+                "Each dot is an area. **Bottom right** is the priority corner: high need, low service. "
+                "**Top left** gets more service than its need suggests. The pink ring is the area picked on the map.\n\n"
+                "Need and service are percentiles *within each topic*, averaged with your weights, so a +0.30 gap "
+                "means the area ranks 30 points higher on need than on service."
+            ),
+        ],
+        widths=[3, 2],
+        align="center",
+        gap=2,
     )
     return
 
@@ -416,16 +481,25 @@ def _(mo):
     - **Reactivity made the method honest.** Sliders, the time window and the "fast fix" cutoff all feed
       one scoring function. marimo re-runs only what depends on them, so the map, scatter, Gap Card,
       robust top 10 and CSV always agree.
-    - **`mo.ui.anywidget`** let us build the Gap Card in about 70 lines of plain JavaScript and read its
-      clicks back in Python like any other control. Clicking a row recolors the map with no extra wiring.
+    - **One file, two products.** `marimo edit` shows this notebook with its code; `marimo run` serves the
+      same file as a web app with the code hidden. `mo.sidebar` keeps the controls on screen,
+      `App(css_file=...)` styles the hero, and `mo.query_params` gives every area a shareable link.
+    - **`mo.ui.anywidget` let us build what marimo lacks.** Our map explorer is plain SVG and JavaScript
+      (no map library, so it works offline). Its `selected` and `focus` come back to Python like any control.
+    - **Updating a live widget.** A cell can push new data into a widget (`widget.data = ...`) and the browser
+      redraws without re-creating it, so the picked area survives every slider move.
     - **PEP 723 + `--sandbox`** means one command sets up everything from the notebook file itself.
     - **`mo.accordion`** kept the data checks one click away without slowing the 5-minute read.
 
     **What was hard**
 
     - **You can't click a map shape yet.** In marimo 0.24.2, `mo.ui.altair_chart` turns off selection on
-      geoshape charts ("Geoshapes + chart selection is not yet supported"). So area picking goes through
-      the scatter plot and a dropdown instead of the map. This is our top feature request.
+      geoshape charts ("Geoshapes + chart selection is not yet supported"). We wrote our own map widget to get
+      around it, but most people won't, so this is still our top feature request.
+    - **`mo.nav_menu` reloads the app when the URL has a query.** Its `#section` links go to `/#section`, which
+      drops `?area=...` and reloads the whole page. Plain `<a href="#section">` links in `mo.Html` work.
+    - **Would pushing data into a widget re-run the cells that read it?** The docs don't say. Reading the source
+      showed only browser-side changes trigger re-runs, so there is no loop, but a one-line note would help.
     - **Layered charts don't return `.value`.** You must call `.apply_selection(df)` instead. It works, but
       it took reading the source to find out.
     - **Big maps hit the output size limit.** Our full-detail area boundaries (1.7 MB) made the map cell show an
@@ -456,6 +530,9 @@ def _(mo):
       Counting them would have inflated need.
     - **It reviewed our old starter script** and found it was cut off mid-file, used made-up request type
       names, and had a text search that would crash on a bracket in one name.
+    - **It tested risky ideas small first.** Before turning the notebook into an app, it built a 60-line throwaway
+      notebook to check that live widget updates, sidebar sliders and jump links work in `marimo run`. Then it
+      clicked through the real app in a headless browser, in light and dark themes.
 
     **Where it was wrong, or we had to push**
 
@@ -465,7 +542,8 @@ def _(mo):
     - **Starter code can look polished and still be broken.** The earlier AI-written script looked complete
       but could not run.
     - **"It runs" is not "it works."** The notebook passed a headless run and an HTML export, but opening it in
-      a real browser showed the map was too big to display. Only a real browser test caught it.
+      a real browser showed the map was too big to display. Later, the sidebar links passed the small test but
+      reloaded the whole app once shareable `?area=` links existed. Only clicking through the real app caught it.
     - **First results needed a sanity check.** The first "quiet but bad" list flagged Downtown and Harbor East,
       because violent crime *per resident* is extreme where few people live. We switched to vacancy only.
 
@@ -702,7 +780,7 @@ def _(
             _raw = pl.DataFrame(
                 fetch_rows(
                     _c, LAYERS["sr311"], f"SRType IN ({_types})",
-                    "SRType,SRStatus,CreatedDate,CloseDate,Latitude,Longitude",
+                    "SRType,SRStatus,CreatedDate,CloseDate,Latitude,Longitude,Address",
                 ),
                 infer_schema_length=None,
             )
@@ -719,14 +797,15 @@ def _(
                 pl.from_epoch("CloseDate", time_unit="ms").alias("closed"),
             )
             _sr_in = _sr.filter(pl.col("csa").is_not_null()).select(
-                "csa", "domain", "proactive", pl.col("SRType").alias("sr_type"), "created", "closed"
+                "csa", "domain", "proactive", pl.col("SRType").alias("sr_type"), "created", "closed",
+                pl.col("x", "y").round(5), pl.col("Address").str.strip_chars().alias("address"),
             )
 
             # --- Housing: open vacancy notices, rehab permits, demolitions
             _housing_specs = {
-                "open_notice": ("open_notices", "BLOCKLOT,DateNotice", "DateNotice"),
-                "rehab": ("rehabs", "BLOCKLOT,DateIssue,VBN", "DateIssue"),
-                "demolition": ("demolitions", "BLOCKLOT,DateDemoFinished", "DateDemoFinished"),
+                "open_notice": ("open_notices", "BLOCKLOT,DateNotice,Address", "DateNotice"),
+                "rehab": ("rehabs", "BLOCKLOT,DateIssue,VBN,Address", "DateIssue"),
+                "demolition": ("demolitions", "BLOCKLOT,DateDemoFinished,Address", "DateDemoFinished"),
             }
             _frames, _housing_counts = [], {}
             for _kind, (_layer, _fields, _date) in _housing_specs.items():
@@ -738,6 +817,9 @@ def _(
                         pl.col("BLOCKLOT").str.strip_chars().alias("blocklot"),
                         pl.from_epoch(pl.col(_date).cast(pl.Int64), time_unit="ms").alias("date"),
                         pl.Series("csa", assign_area(_h["x"], _h["y"], _shapes), dtype=pl.String),
+                        pl.col("x").cast(pl.Float64).round(5),
+                        pl.col("y").cast(pl.Float64).round(5),
+                        pl.col("Address").cast(pl.String).str.strip_chars().alias("address"),
                     )
                 )
             _housing = pl.concat(_frames)
@@ -790,8 +872,7 @@ def _(Path, build_snapshot, json, mo, pl, shapely):
     requests_311 = pl.read_parquet(DATA_DIR / "requests_311.parquet")
     housing = pl.read_parquet(DATA_DIR / "housing.parquet")
     areas = pl.DataFrame([f["properties"] for f in areas_geo["features"]])
-    area_names = sorted(areas["csa"].to_list())
-    return area_names, areas, areas_geo, housing, requests_311, snapshot_meta
+    return areas, areas_geo, housing, requests_311, snapshot_meta
 
 
 @app.cell
@@ -1038,8 +1119,7 @@ def _(
 
 
 @app.cell
-def _(MID, OVER, UNDER, alt, mo, overall):
-    _pick = alt.selection_point(fields=["csa"], name="pick", on="click")
+def _(MID, OVER, UNDER, alt, overall, pl, selected_area):
     _dots = (
         alt.Chart(overall)
         .mark_circle(size=110, stroke="#333", strokeWidth=0.4)
@@ -1051,7 +1131,6 @@ def _(MID, OVER, UNDER, alt, mo, overall):
                 scale=alt.Scale(range=[OVER, MID, UNDER], domainMid=0, domain=[-0.6, 0.6], clamp=True),
                 legend=None,
             ),
-            opacity=alt.condition(_pick, alt.value(1), alt.value(0.35)),
             tooltip=[
                 alt.Tooltip("csa:N", title="Area"),
                 alt.Tooltip("rank:Q", title="Gap rank"),
@@ -1060,7 +1139,12 @@ def _(MID, OVER, UNDER, alt, mo, overall):
                 alt.Tooltip("gap:Q", format="+.2f"),
             ],
         )
-        .add_params(_pick)
+    )
+    _picked = overall.filter(pl.col("csa") == selected_area)
+    # Pink marks the picked area: outside the blue/orange gap scale, and readable in light and dark themes.
+    _ring = alt.Chart(_picked).mark_circle(size=420, fill=None, stroke="#d53f8c", strokeWidth=3).encode(x="need:Q", y="service:Q")
+    _name = alt.Chart(_picked).mark_text(dy=-20, fontWeight="bold", fontSize=12, color="#d53f8c").encode(
+        x="need:Q", y="service:Q", text="csa:N"
     )
     _mid = alt.Chart(alt.Data(values=[{"m": 0.5}]))
     _rules = _mid.mark_rule(strokeDash=[4, 4], color="#888").encode(x="m:Q") + _mid.mark_rule(
@@ -1080,93 +1164,285 @@ def _(MID, OVER, UNDER, alt, mo, overall):
         + _corner(0.02, 0.97, "Over-served", "left")
         + _corner(0.02, 0.03, "Fine", "left")
     )
-    quadrant = mo.ui.altair_chart(
-        (_rules + _labels + _dots).properties(
-            width=380, height=380, title="Orange dots, bottom right: high need, low service"
-        )
+    quadrant = (_rules + _labels + _dots + _ring + _name).properties(
+        width=420, height=400, title="Orange dots, bottom right: high need, low service"
     )
     return (quadrant,)
 
 
 @app.cell
-def _(area_pick, overall, quadrant):
-    _clicked = quadrant.apply_selection(overall)
-    if 0 < _clicked.height < overall.height:
-        selected_area = _clicked.sort("gap", descending=True)["csa"][0]
-        selected_source = "picked on the chart; double-click the chart to clear"
-    else:
-        selected_area = area_pick.value
-        selected_source = "picked from the list"
-    return selected_area, selected_source
+def _(areas_geo, np, shapely):
+    # Flat projection for our own SVG map: fine at city scale, and needs no JS map library (works offline).
+    _b = np.array([shapely.geometry.shape(f["geometry"]).bounds for f in areas_geo["features"]])
+    _lon0, _lat0, _lon1, _lat1 = _b[:, 0].min(), _b[:, 1].min(), _b[:, 2].max(), _b[:, 3].max()
+    _kx = np.cos(np.radians((_lat0 + _lat1) / 2))
+    _scale = 1000 / (_lat1 - _lat0)
+    MAP_SIZE = [round(float((_lon1 - _lon0) * _kx * _scale), 1), 1000.0]
+
+    def project(lon, lat):
+        """Longitude/latitude to map units (1 unit is about 20 m)."""
+        return (np.asarray(lon) - _lon0) * _kx * _scale, (_lat1 - np.asarray(lat)) * _scale
+
+    def svg_path(geom):
+        """SVG path data for a (multi)polygon, holes included."""
+        _parts = []
+        for _poly in getattr(geom, "geoms", [geom]):
+            for _ring in [_poly.exterior, *_poly.interiors]:
+                _x, _y = project(*np.asarray(_ring.coords)[:, :2].T)
+                _parts.append("M" + "L".join(f"{a:.1f},{b:.1f}" for a, b in zip(_x, _y)) + "Z")
+        return "".join(_parts)
+
+    map_shapes = []
+    for _f in areas_geo["features"]:
+        _g = shapely.geometry.shape(_f["geometry"])
+        _x, _y = project([_g.bounds[0], _g.bounds[2]], [_g.bounds[3], _g.bounds[1]])
+        map_shapes.append(
+            {
+                "csa": _f["properties"]["csa"],
+                "d": svg_path(_g),
+                "box": [round(float(_x[0]), 1), round(float(_y[0]), 1), round(float(_x[1] - _x[0]), 1), round(float(_y[1] - _y[0]), 1)],
+            }
+        )
+    return MAP_SIZE, map_shapes, project
 
 
 @app.cell
 def _(anywidget, traitlets):
-    class GapCard(anywidget.AnyWidget):
-        """One dumbbell per topic: need vs service percentile, widest gap first. Click a row to focus it."""
+    class TriageExplorer(anywidget.AnyWidget):
+        """Clickable gap map + Gap Card in one widget.
+
+        Click an area to select it and zoom to its streets (dots = real requests and vacant buildings).
+        Click a Gap Card row to recolor the map by that topic. Python reads `selected` and `focus`,
+        and pushes new scores (`data`) and dots (`points`) without re-creating the widget.
+        """
 
         _esm = r"""
+        const OVER = [43, 108, 176], MID = [241, 241, 241], UNDER = [221, 107, 32];
+        const DOT = { open: "#dd6b20", slow: "#f6ad55", fast: "#a0aec0", vacant: "#2d3748", handled: "#2b6cb0" };
+        const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+        const gapColor = (g) => {
+          if (g === null || g === undefined) return "url(#tx-na)";
+          const t = Math.max(-1, Math.min(1, g / 0.6));
+          return `rgb(${t < 0 ? mix(MID, OVER, -t) : mix(MID, UNDER, t)})`;
+        };
+        const signed = (g) => (g > 0 ? "+" : "") + Math.round(g * 100);
+        const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+        const NS = "http://www.w3.org/2000/svg";
+
         function render({ model, el }) {
-          const W = 260, PAD = 10;
-          const x = (p) => PAD + p * (W - 2 * PAD);
-          const draw = () => {
-            const rows = model.get("rows"), focus = model.get("focus");
-            el.innerHTML = "";
-            const root = document.createElement("div");
-            root.className = "gc";
-            const head = document.createElement("div");
-            head.className = "gc-head";
-            head.innerHTML = `<b>${model.get("area")}</b><span>${model.get("subtitle")}</span>`;
-            root.appendChild(head);
-            const scale = document.createElement("div");
-            scale.className = "gc-row gc-scale";
-            scale.innerHTML = `<span></span><svg width="${W}" height="14">
-              <text x="${PAD}" y="11">0%</text><text x="${W / 2}" y="11" text-anchor="middle">50%</text>
-              <text x="${W - PAD}" y="11" text-anchor="end">100%</text></svg><span>gap</span>`;
-            root.appendChild(scale);
-            for (const r of rows) {
-              const row = document.createElement("div");
-              row.className = "gc-row" + (focus === r.domain ? " gc-focus" : "") + (r.gap === null ? " gc-na" : "");
-              const color = r.gap === null ? "#999" : r.gap > 0 ? "#dd6b20" : "#2b6cb0";
-              let svg = `<line x1="${PAD}" x2="${W - PAD}" y1="12" y2="12" class="gc-track"/>`;
-              if (r.gap !== null) {
-                svg += `<line x1="${x(r.need)}" x2="${x(r.service)}" y1="12" y2="12" stroke="${color}" stroke-width="4"/>`;
-                svg += `<circle cx="${x(r.service)}" cy="12" r="6" fill="white" stroke="${color}" stroke-width="2.5"/>`;
-              }
-              svg += `<circle cx="${x(r.need)}" cy="12" r="6" fill="${color}"/>`;
-              const gapText = r.gap === null ? "n/a" : (r.gap > 0 ? "+" : "") + Math.round(r.gap * 100);
-              row.innerHTML = `<span class="gc-name" title="${r.detail}">${r.domain}</span>
-                <svg width="${W}" height="24">${svg}</svg>
-                <span class="gc-gap" style="color:${color}">${gapText}</span>`;
-              row.title = r.detail;
-              row.onclick = () => {
-                model.set("focus", focus === r.domain ? "" : r.domain);
-                model.save_changes();
-              };
-              root.appendChild(row);
+          const [W, H] = model.get("size");
+          const full = [0, 0, W, H];
+          let view = full.slice(), zoomed = false, anim = null;
+
+          el.innerHTML = `
+            <div class="tx">
+              <div class="tx-map">
+                <div class="tx-bar">
+                  <button class="tx-back" hidden>← Back to city</button>
+                  <b class="tx-title"></b>
+                  <input class="tx-search" list="tx-names" placeholder="Find an area…">
+                  <datalist id="tx-names"></datalist>
+                </div>
+                <svg class="tx-svg" viewBox="${full.join(" ")}">
+                  <defs><pattern id="tx-na" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                    <rect width="8" height="8" fill="#e2e2e2"/><line x1="0" y1="0" x2="0" y2="8" stroke="#c4c4c4" stroke-width="3"/></pattern></defs>
+                  <g class="tx-areas"></g><g class="tx-dots"></g>
+                </svg>
+                <div class="tx-legend"></div>
+                <div class="tx-tip" hidden></div>
+              </div>
+              <div class="tx-card"></div>
+            </div>`;
+          const $ = (s) => el.querySelector(s);
+          const svg = $(".tx-svg"), gAreas = $(".tx-areas"), gDots = $(".tx-dots"), tip = $(".tx-tip");
+
+          // --- Areas: built once
+          const paths = {};
+          for (const s of model.get("shapes")) {
+            const p = document.createElementNS(NS, "path");
+            p.setAttribute("d", s.d);
+            p.dataset.csa = s.csa;
+            gAreas.appendChild(p);
+            paths[s.csa] = { el: p, box: s.box };
+            $("#tx-names").insertAdjacentHTML("beforeend", `<option value="${esc(s.csa)}">`);
+          }
+          const boxOf = (csa) => paths[csa] && paths[csa].box;
+
+          const select = (csa, zoom) => {
+            if (!paths[csa]) return;
+            if (model.get("selected") !== csa) {
+              model.set("selected", csa);
+              model.save_changes();
             }
-            const foot = document.createElement("div");
-            foot.className = "gc-foot";
-            foot.innerHTML = `<span class="gc-dot" style="background:#555"></span> need
-              <span class="gc-dot gc-hollow"></span> service ·
-              <span style="color:#dd6b20">orange = under-served</span> ·
-              <span style="color:#2b6cb0">blue = over-served</span> · hover a row for raw numbers`;
-            root.appendChild(foot);
-            el.appendChild(root);
+            if (zoom) zoomTo(csa);
           };
-          model.on("change:rows", draw);
-          model.on("change:focus", draw);
-          model.on("change:area", draw);
-          draw();
+
+          // --- Zoom: animate the viewBox to the area's box (kept at the map's shape)
+          const zoomTo = (csa) => {
+            let target = full;
+            zoomed = !!csa;
+            if (csa) {
+              const [x, y, w, h] = boxOf(csa);
+              let tw = w * 1.3, th = h * 1.3;
+              if (tw / th > W / H) th = (tw * H) / W; else tw = (th * W) / H;
+              target = [x + w / 2 - tw / 2, y + h / 2 - th / 2, tw, th];
+            }
+            gDots.style.display = "none";
+            const from = view.slice(), t0 = performance.now();
+            cancelAnimationFrame(anim);
+            const step = (now) => {
+              const t = Math.min(1, (now - t0) / 550), e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+              view = from.map((v, i) => v + (target[i] - v) * e);
+              svg.setAttribute("viewBox", view.join(" "));
+              if (t < 1) anim = requestAnimationFrame(step);
+              else { drawDots(); paint(); }
+            };
+            anim = requestAnimationFrame(step);
+            paint();
+          };
+
+          // --- Colors, outline, titles, legend
+          const paint = () => {
+            const data = model.get("data"), focus = model.get("focus"), sel = model.get("selected");
+            if (!data.overall) return;
+            const values = focus ? data.topics[focus] || {} : Object.fromEntries(Object.entries(data.overall).map(([k, v]) => [k, v.gap]));
+            for (const [csa, p] of Object.entries(paths)) {
+              // Zoomed: plain background for the picked area so the dots stand out (its gap is in the card).
+              p.el.setAttribute("fill", zoomed && csa === sel ? "#f5f2ec" : gapColor(values[csa]));
+              p.el.classList.toggle("tx-sel", csa === sel);
+              p.el.classList.toggle("tx-dim", zoomed && csa !== sel);
+            }
+            if (paths[sel]) gAreas.appendChild(paths[sel].el); // draw the outline on top
+            $(".tx-back").hidden = !zoomed;
+            const pts = model.get("points");
+            $(".tx-title").textContent = zoomed
+              ? `${sel}${pts.area === sel && pts.note ? ": " + pts.note : ""}`
+              : focus ? `${focus} only: orange areas need more than they get` : "Neglect gap: orange = high need, low service";
+            $(".tx-legend").innerHTML = zoomed
+              ? (focus === "Vacant buildings" ? "" :
+                  `<span><i style="background:${DOT.open}"></i>still open (bigger = older)</span>` +
+                  (focus ? `<span><i style="background:${DOT.slow}"></i>closed late</span><span><i style="background:${DOT.fast}"></i>closed within ${data.fix_days} days</span>` : "")) +
+                (!focus || focus === "Vacant buildings"
+                  ? `<span><i class="sq" style="background:${DOT.vacant}"></i>vacant, no rehab or demolition</span><span><i class="sq" style="background:${DOT.handled}"></i>vacant, handled</span>` : "")
+              : `<span class="tx-grad-l">over-served</span><span class="tx-grad"></span><span>under-served</span><span class="tx-na-key"><i></i>not enough data</span>`;
+          };
+
+          // --- Dots for the zoomed area (sizes stay constant on screen)
+          const drawDots = () => {
+            const pts = model.get("points");
+            gDots.innerHTML = "";
+            if (!zoomed || pts.area !== model.get("selected")) return;
+            const k = view[2] / (svg.clientWidth || 560);
+            const frag = [];
+            pts.items.forEach((p, i) => {
+              const r = (p.r || 3) * k;
+              frag.push(p.k === "vacant" || p.k === "handled"
+                ? `<rect x="${p.x - r * 0.8}" y="${p.y - r * 0.8}" width="${r * 1.6}" height="${r * 1.6}" fill="${DOT[p.k]}" data-i="${i}"/>`
+                : `<circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${DOT[p.k]}" data-i="${i}"/>`);
+            });
+            gDots.innerHTML = frag.join("");
+            gDots.style.display = "";
+          };
+
+          // --- Gap Card for the selected area
+          const drawCard = () => {
+            const data = model.get("data"), sel = model.get("selected"), focus = model.get("focus");
+            const card = (data.cards || {})[sel];
+            if (!card) { $(".tx-card").innerHTML = ""; return; }
+            const CW = 230, PAD = 10, x = (p) => PAD + p * (CW - 2 * PAD);
+            let html = `<div class="gc-head"><b>${esc(sel)}</b><span>${esc(card.subtitle)}</span></div>
+              <div class="gc-row gc-scale"><span></span><svg width="${CW}" height="14"><text x="${PAD}" y="11">0%</text>
+              <text x="${CW / 2}" y="11" text-anchor="middle">50%</text><text x="${CW - PAD}" y="11" text-anchor="end">100%</text></svg><span>gap</span></div>`;
+            for (const r of card.rows) {
+              const color = r.gap === null ? "#999" : r.gap > 0 ? "#dd6b20" : "#2b6cb0";
+              let s = `<line x1="${PAD}" x2="${CW - PAD}" y1="12" y2="12" class="gc-track"/>`;
+              if (r.gap !== null) {
+                s += `<line x1="${x(r.need)}" x2="${x(r.service)}" y1="12" y2="12" stroke="${color}" stroke-width="4"/>`;
+                s += `<circle cx="${x(r.service)}" cy="12" r="6" fill="white" stroke="${color}" stroke-width="2.5"/>`;
+              }
+              s += `<circle cx="${x(r.need)}" cy="12" r="6" fill="${color}"/>`;
+              html += `<div class="gc-row${focus === r.domain ? " gc-focus" : ""}${r.gap === null ? " gc-na" : ""}" data-domain="${esc(r.domain)}" title="${esc(r.detail)}">
+                <span class="gc-name">${esc(r.domain)}</span><svg width="${CW}" height="24">${s}</svg>
+                <span class="gc-gap" style="color:${color}">${r.gap === null ? "n/a" : signed(r.gap)}</span></div>`;
+            }
+            html += `<div class="gc-foot"><span class="gc-dot" style="background:#555"></span> need
+              <span class="gc-dot gc-hollow"></span> service · <span style="color:#dd6b20">orange = under-served</span> ·
+              <span style="color:#2b6cb0">blue = over-served</span><br>Click a row to color the map by that topic.
+              Hover for raw numbers.</div>`;
+            $(".tx-card").innerHTML = html;
+          };
+
+          // --- Events
+          gAreas.addEventListener("click", (e) => e.target.dataset.csa && select(e.target.dataset.csa, true));
+          $(".tx-back").addEventListener("click", () => zoomTo(null));
+          $(".tx-search").addEventListener("change", (e) => {
+            if (paths[e.target.value]) { select(e.target.value, true); e.target.value = ""; e.target.blur(); }
+          });
+          $(".tx-card").addEventListener("click", (e) => {
+            const row = e.target.closest("[data-domain]");
+            if (!row) return;
+            model.set("focus", model.get("focus") === row.dataset.domain ? "" : row.dataset.domain);
+            model.save_changes();
+          });
+          const showTip = (e, html) => {
+            const box = $(".tx-map").getBoundingClientRect();
+            tip.innerHTML = html;
+            tip.hidden = false;
+            tip.style.left = `${Math.min(e.clientX - box.left + 14, box.width - 240)}px`;
+            tip.style.top = `${e.clientY - box.top + 14}px`;
+          };
+          svg.addEventListener("mousemove", (e) => {
+            const data = model.get("data"), focus = model.get("focus");
+            if (e.target.dataset.i !== undefined) {
+              return showTip(e, esc(model.get("points").items[+e.target.dataset.i].t));
+            }
+            const csa = e.target.dataset.csa;
+            if (!csa || !data.overall) return (tip.hidden = true);
+            const o = data.overall[csa] || {}, g = focus ? (data.topics[focus] || {})[csa] : o.gap;
+            showTip(e, `<b>${esc(csa)}</b><br>${focus ? esc(focus) + " gap" : "Gap"}: ${g === null || g === undefined ? "n/a" : signed(g)}` +
+              (o.rank ? ` · overall rank ${o.rank} of ${data.n}` : "") + (zoomed ? "" : "<br><i>click to zoom in</i>"));
+          });
+          svg.addEventListener("mouseleave", () => (tip.hidden = true));
+
+          model.on("change:data", () => { paint(); drawCard(); });
+          model.on("change:focus", () => { paint(); drawCard(); });
+          model.on("change:selected", () => { paint(); drawCard(); });
+          model.on("change:points", () => { drawDots(); paint(); });
+          paint();
+          drawCard();
+          return () => cancelAnimationFrame(anim);
         }
         export default { render };
         """
         _css = r"""
-        .gc { font: 13px/1.3 system-ui, sans-serif; max-width: 520px; }
-        .gc-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; gap: 12px; }
+        .tx { display: flex; flex-wrap: wrap; gap: 20px; font: 13px/1.35 system-ui, sans-serif; align-items: flex-start; }
+        .tx-map { flex: 1 1 480px; min-width: 300px; position: relative; }
+        .tx-card { flex: 0 1 440px; min-width: 300px; }
+        .tx-bar { display: flex; align-items: center; gap: 8px; min-height: 32px; margin-bottom: 4px; flex-wrap: wrap; }
+        .tx-title { flex: 1 1 100%; order: 3; font-size: 14px; }
+        .tx-search, .tx-back { font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid rgba(127,127,127,0.45); background: transparent; color: inherit; }
+        .tx-search { width: 170px; margin-left: auto; }
+        .tx-back { cursor: pointer; font-weight: 600; }
+        .tx-back:hover { background: rgba(127,127,127,0.15); }
+        .tx-svg { width: 100%; height: auto; display: block; max-height: 640px; }
+        .tx-areas path { stroke: #fff; stroke-width: 0.8; vector-effect: non-scaling-stroke; cursor: pointer; transition: opacity 0.3s; }
+        .tx-areas path:hover { stroke: #444; stroke-width: 1.5; }
+        .tx-areas path.tx-sel { stroke: #111; stroke-width: 2.8; }
+        .tx-areas path.tx-dim { opacity: 0.25; }
+        .tx-dots circle, .tx-dots rect { stroke: #fff; stroke-width: 0.6; vector-effect: non-scaling-stroke; opacity: 0.9; }
+        .tx-dots circle:hover, .tx-dots rect:hover { stroke: #000; stroke-width: 1.5; }
+        .tx-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 11px; color: #777; margin-top: 4px; }
+        .tx-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
+        .tx-legend i.sq { border-radius: 2px; }
+        .tx-grad { width: 160px; height: 10px; border-radius: 3px; background: linear-gradient(90deg, #2b6cb0, #f1f1f1, #dd6b20); }
+        .tx-grad-l { margin-right: -8px; }
+        .tx-na-key i { background: repeating-linear-gradient(45deg, #e2e2e2 0 3px, #c4c4c4 3px 5px); border-radius: 2px; }
+        .tx-tip { position: absolute; pointer-events: none; background: rgba(20,20,20,0.92); color: #fff; padding: 6px 9px;
+                  border-radius: 6px; font-size: 12px; max-width: 240px; z-index: 5; }
+        .gc-head { display: flex; justify-content: space-between; align-items: baseline; margin: 6px 0; gap: 12px; }
         .gc-head b { font-size: 15px; }
-        .gc-head span { color: #777; font-size: 12px; }
-        .gc-row { display: grid; grid-template-columns: 150px 260px 44px; align-items: center; cursor: pointer; border-radius: 4px; }
+        .gc-head span { color: #777; font-size: 12px; text-align: right; }
+        .gc-row { display: grid; grid-template-columns: 150px 230px 40px; align-items: center; cursor: pointer; border-radius: 4px; }
         .gc-row:hover { background: rgba(127,127,127,0.12); }
         .gc-focus { background: rgba(221,107,32,0.15); outline: 1px solid #dd6b20; }
         .gc-na .gc-name { color: #999; }
@@ -1179,93 +1455,135 @@ def _(anywidget, traitlets):
         .gc-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; vertical-align: middle; }
         .gc-hollow { border: 2px solid #555; width: 5px; height: 5px; }
         """
-        area = traitlets.Unicode("").tag(sync=True)
-        subtitle = traitlets.Unicode("").tag(sync=True)
-        rows = traitlets.List([]).tag(sync=True)
+        shapes = traitlets.List([]).tag(sync=True)
+        size = traitlets.List([1000, 1000]).tag(sync=True)
+        data = traitlets.Dict({}).tag(sync=True)
+        points = traitlets.Dict({"area": "", "note": "", "items": []}).tag(sync=True)
+        selected = traitlets.Unicode("").tag(sync=True)
         focus = traitlets.Unicode("").tag(sync=True)
-    return (GapCard,)
+    return (TriageExplorer,)
 
 
 @app.cell
-def _(GapCard, VACANCY, domain_scores, fix_days, mo, overall, pl, selected_area):
+def _(MAP_SIZE, TriageExplorer, default_overall, map_shapes, mo):
+    # Created once, so the selection survives slider moves. Scores and dots are pushed in by the cells below.
+    # `?area=Cherry Hill` in the URL opens the app on that area (read once, never re-triggers this cell).
+    _asked = mo.query_params().get("area")
+    triage_widget = TriageExplorer(
+        shapes=map_shapes,
+        size=MAP_SIZE,
+        selected=_asked if _asked in default_overall["csa"].to_list() else default_overall["csa"][0],
+    )
+    explorer = mo.ui.anywidget(triage_widget)
+    return explorer, triage_widget
+
+
+@app.cell
+def _(VACANCY, domain_scores, fix_days, overall, pl, triage_widget):
     def _detail(r):
         _svc = "not enough requests" if r["service_rate"] is None else f"{r['service_rate']:.0%}"
         _svc_label = "handled since 2023" if r["domain"] == VACANCY else f"closed within {fix_days.value} days"
         _pro = "" if r["proactive_share"] is None else f" · proactive share {r['proactive_share']:.0%}"
         return f"{r['n_reports']:,} reports ({r['need_rate']:.1f} per 1,000) · {_svc} {_svc_label}{_pro}"
 
-    _rows = (
-        domain_scores.filter(pl.col("csa") == selected_area)
-        .sort(pl.col("gap").fill_null(-9), descending=True)
-        .to_dicts()
-    )
-    _o = overall.filter(pl.col("csa") == selected_area).to_dicts()
-    _sub = f"gap rank {_o[0]['rank']} of {overall.height} · overall gap {_o[0]['gap']:+.2f}" if _o else ""
-    gap_card = mo.ui.anywidget(
-        GapCard(
-            area=selected_area,
-            subtitle=_sub,
-            rows=[
-                {
-                    "domain": r["domain"],
-                    "need": r["need_pct"],
-                    "service": r["service_pct"],
-                    "gap": r["gap"],
-                    "detail": _detail(r),
-                }
-                for r in _rows
-            ],
+    _overall = {r["csa"]: r for r in overall.to_dicts()}
+    _cards = {}
+    for _r in domain_scores.sort(pl.col("gap").fill_null(-9), descending=True).to_dicts():
+        _o = _overall.get(_r["csa"])
+        _card = _cards.setdefault(
+            _r["csa"],
+            {"subtitle": f"gap rank {_o['rank']} of {overall.height} · overall gap {_o['gap']:+.2f}" if _o else "", "rows": []},
         )
-    )
-    return (gap_card,)
+        _card["rows"].append(
+            {"domain": _r["domain"], "need": _r["need_pct"], "service": _r["service_pct"], "gap": _r["gap"], "detail": _detail(_r)}
+        )
+    # Uses the raw widget (not `explorer`), so pushing new scores never re-runs this cell.
+    triage_widget.data = {
+        "n": overall.height,
+        "fix_days": fix_days.value,
+        "overall": {c: {"gap": o["gap"], "rank": o["rank"]} for c, o in _overall.items()},
+        "topics": {
+            d: dict(zip(g["csa"].to_list(), g["gap"].to_list()))
+            for (d,), g in domain_scores.group_by("domain")
+        },
+        "cards": _cards,
+    }
+    return
 
 
 @app.cell
-def _(MID, OVER, UNDER, alt, areas_geo, domain_scores, gap_card, overall, pl, selected_area):
-    _focus = gap_card.value.get("focus", "")
-    if _focus:
-        _vals = domain_scores.filter(pl.col("domain") == _focus).select("csa", pl.col("gap").alias("value"))
-        _title = f"{_focus} only: orange areas need more than they get"
+def _(default_overall, explorer, mo):
+    selected_area = explorer.value.get("selected") or default_overall["csa"][0]
+    focus_topic = explorer.value.get("focus") or ""
+    mo.query_params().set("area", selected_area)
+    return focus_topic, selected_area
+
+
+@app.cell
+def _(
+    VACANCY,
+    area_requests,
+    area_vacancy,
+    fix_days,
+    focus_topic,
+    housing,
+    pl,
+    project,
+    requests_311,
+    selected_area,
+    snapshot_meta,
+    triage_widget,
+    window,
+):
+    area_reqs = area_requests(
+        requests_311, selected_area, snapshot_ts=snapshot_meta["snapshot_ts"],
+        window_days=window.value, fix_days=fix_days.value,
+        topic=focus_topic if focus_topic != VACANCY else None,
+    )
+    area_vac = area_vacancy(housing, selected_area)
+
+    # Dots for the zoomed map: no topic picked = still-open requests + vacant buildings;
+    # a 311 topic = all its requests; vacancy = vacant buildings only.
+    _reqs = area_reqs.filter(pl.col("status") == "open") if not focus_topic else area_reqs
+    _reqs = _reqs if focus_topic != VACANCY else _reqs.clear()
+    _vac = area_vac if focus_topic in ("", VACANCY) else area_vac.clear()
+    _items = []
+    for _df, _tip in [
+        (
+            _reqs.with_columns(pl.col("status").alias("k")),
+            lambda r: f"{r['domain']} · {r['address']} · "
+            + (f"open {r['days']} days" if r["status"] == "open" else f"closed in {r['days']} days"),
+        ),
+        (
+            _vac.with_columns(pl.when(pl.col("handled")).then(pl.lit("handled")).otherwise(pl.lit("vacant")).alias("k")),
+            lambda r: f"{r['address']} · "
+            + (f"{r['action']} {r['action_date']:%b %Y}" if r["handled"] else f"vacant notice since {r['notice_date']:%b %Y}, no action"),
+        ),
+    ]:
+        if _df.height == 0:
+            continue
+        _x, _y = project(_df["x"].to_numpy(), _df["y"].to_numpy())
+        for _r, _px, _py in zip(_df.to_dicts(), _x, _y):
+            _age = _r.get("days") if _r["k"] == "open" else None
+            _items.append(
+                {
+                    "x": round(float(_px), 1),
+                    "y": round(float(_py), 1),
+                    "k": _r["k"],
+                    "r": 3.5 + min(_age, 180) / 40 if _age is not None else 3.4,
+                    "t": _tip(_r),
+                }
+            )
+    _n_open = area_reqs.filter(pl.col("status") == "open").height
+    if focus_topic == VACANCY or not focus_topic:
+        _note = f"{_n_open:,} open 311 requests · {area_vac.height:,} vacant buildings ({area_vac['handled'].mean() or 0:.0%} handled)"
+        if focus_topic:
+            _note = f"{area_vac.height:,} vacant buildings, {area_vac['handled'].mean() or 0:.0%} rehabbed or torn down since 2023"
     else:
-        _vals = overall.select("csa", pl.col("gap").alias("value"))
-        _title = "Neglect gap: orange = high need, low service"
-    _lookup = dict(zip(_vals["csa"], _vals["value"]))
-    _rank = dict(zip(overall["csa"], overall["rank"]))
-    _features = [
-        {
-            "type": "Feature",
-            "geometry": f["geometry"],
-            "properties": {
-                "csa": f["properties"]["csa"],
-                "value": _lookup.get(f["properties"]["csa"]),
-                "rank": _rank.get(f["properties"]["csa"]),
-            },
-        }
-        for f in areas_geo["features"]
-    ]
-    _fill = (
-        alt.Chart(alt.Data(values=_features))
-        .mark_geoshape(stroke="white", strokeWidth=0.6)
-        .encode(
-            color=alt.Color(
-                "properties.value:Q",
-                title="Gap",
-                scale=alt.Scale(range=[OVER, MID, UNDER], domainMid=0, domain=[-0.6, 0.6], clamp=True),
-                legend=alt.Legend(orient="bottom", format="+.1f", gradientLength=220),
-            ),
-            tooltip=[
-                alt.Tooltip("properties.csa:N", title="Area"),
-                alt.Tooltip("properties.value:Q", title="Gap", format="+.2f"),
-                alt.Tooltip("properties.rank:Q", title="Overall gap rank"),
-            ],
-        )
-    )
-    _outline = (
-        alt.Chart(alt.Data(values=[f for f in _features if f["properties"]["csa"] == selected_area]))
-        .mark_geoshape(fill=None, stroke="#111", strokeWidth=2.5)
-    )
-    gap_map = (_fill + _outline).project("mercator").properties(width=380, height=400, title=_title)
-    return (gap_map,)
+        _fast = (area_reqs["status"] == "fast").mean() if area_reqs.height else 0
+        _note = f"{area_reqs.height:,} {focus_topic.lower()} reports · {_n_open:,} still open · {_fast:.0%} closed within {fix_days.value} days"
+    triage_widget.points = {"area": selected_area, "note": _note, "items": _items}
+    return area_reqs, area_vac
 
 
 @app.cell
@@ -1328,6 +1646,50 @@ def _(DOMAINS_311, VACANCY, pl):
             .with_columns(((pl.col("vacancy_pct") >= 2 / 3) & (pl.col("reporting_pct") <= 1 / 2)).alias("quiet_but_bad"))
         )
     return (find_quiet_areas,)
+
+
+@app.cell
+def _(VACANCY_SINCE, datetime, pl, timedelta):
+    _short_address = pl.col("address").str.replace(r",\s*Baltimore.*$", "")
+
+    def area_requests(requests_311, csa, *, snapshot_ts, window_days, fix_days, topic=None):
+        """One area's resident 311 reports in the time window, labeled open / slow / fast, with days open."""
+        _end = datetime.fromisoformat(snapshot_ts)
+        _start = _end - timedelta(days=window_days) if window_days else datetime(1900, 1, 1)
+        _r = requests_311.filter((pl.col("csa") == csa) & ~pl.col("proactive") & (pl.col("created") >= _start))
+        if topic:
+            _r = _r.filter(pl.col("domain") == topic)
+        return _r.with_columns(
+            pl.when(pl.col("closed").is_null()).then(pl.lit("open"))
+            .when(pl.col("closed") - pl.col("created") <= pl.duration(days=fix_days)).then(pl.lit("fast"))
+            .otherwise(pl.lit("slow"))
+            .alias("status"),
+            (pl.coalesce("closed", pl.lit(_end)) - pl.col("created")).dt.total_days().alias("days"),
+            _short_address,
+        )
+
+    def area_vacancy(housing, csa):
+        """One area's vacant buildings, one row per parcel, matching the vacancy score:
+        `handled` = got a rehab permit or demolition since VACANCY_SINCE."""
+        _is_notice = pl.col("kind") == "open_notice"
+        return (
+            housing.filter(
+                (pl.col("csa") == csa)
+                & pl.col("blocklot").is_not_null()
+                & (_is_notice | (pl.col("date") >= datetime.fromisoformat(VACANCY_SINCE)))
+            )
+            .sort("date", descending=True)
+            .group_by("blocklot")
+            .agg(
+                pl.col("x", "y").first(),
+                _short_address.first(),
+                (~_is_notice).any().alias("handled"),
+                pl.col("date").filter(_is_notice).min().alias("notice_date"),
+                pl.col("kind").filter(~_is_notice).first().replace({"rehab": "rehab permit", "demolition": "demolished"}).alias("action"),
+                pl.col("date").filter(~_is_notice).first().alias("action_date"),
+            )
+        )
+    return area_requests, area_vacancy
 
 
 @app.cell

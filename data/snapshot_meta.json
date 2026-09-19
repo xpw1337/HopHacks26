@@ -1,11 +1,11 @@
 {
   "snapshot_date": "2026-09-18",
   "snapshot_ts": "2026-09-18T04:52:32",
-  "built_at": "2026-09-19T03:24:03",
+  "built_at": "2026-09-19T16:47:37",
   "counts": {
     "requests_311": 235132,
     "open_notices": 11481,
-    "rehabs": 12947,
+    "rehabs": 12951,
     "demolitions": 4280,
     "parcels": 234952,
     "areas": 55,

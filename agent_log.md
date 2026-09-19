@@ -27,5 +27,14 @@ Format: **date · tool · task** → what happened → how we checked → lesson
 - Headless run and HTML export passed, but a real browser test showed the map cell hit marimo's output size limit (1.7 MB boundaries). Fixed by simplifying shapes. Lesson: "runs without errors" is not the same as "works".
 - Browser screenshots were often stale, which made early click tests land in the wrong place. Reading the page state with JavaScript confirmed the clicks worked.
 
+**2026-09-19 · Claude Code · turning the notebook into a web app**
+- Goal: stop "throwing a notebook at the judges". Same `script.py`, served with `marimo run`: sidebar controls, hero header, custom map explorer that zooms to real requests, work list per area, `?area=` share links.
+- Tested the risky parts in a throwaway notebook first: widget updates from another cell, sidebar sliders, jump links, `css_file`. All worked.
+- Rebuilt the snapshot to keep each record's point and address. First try rounded coordinates *before* placing points in areas, which pushed 10 edge points outside the city (369 → 379 dropped). Fixed by rounding only when saving. Rebuilt counts match the old snapshot (plus 4 new rehab permits); top area, robust area and the fix check (+0.94 → −0.66) unchanged.
+- The Chrome extension wasn't connected, so the agent drove the installed Edge headlessly with Playwright to click through the app.
+- Bug found only by that click-through: `mo.nav_menu` links reloaded the whole app once `?area=` was in the URL. Replaced with plain `#section` links.
+- Dark mode: the browser's dark setting didn't change marimo's theme, so the first "dark" test was really light. Re-tested with marimo's theme set to dark; fixed a black ring that disappeared on the scatter.
+- Lesson: test in the real product, and check the test really tested what you think (the dark-mode test didn't, at first).
+
 **2026-09-19 · Claude Code · rubric check**
 - Compared the plan to the judging rubric and added a checklist. Gaps found: no related-work box, headings not matching the rubric's words, the separate loader module hurt "self-contained", and there was no offline test.
