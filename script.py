@@ -907,11 +907,29 @@ def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta
         _c = pl.col(col)
         return ((_c.rank("average") - 1) / (_c.count() - 1)).over("domain")
 
-    def score_areas(requests_311, housing, areas, *, snapshot_ts, window_days, fix_days, per):
+    def neglect_residual(service_col="service_pct", need_col="need_pct"):
+        """How far *below* the service its need predicts an area sits, within a topic.
+
+        Least-squares fit of service on need across the areas scored for that topic, then the
+        negated residual. Orthogonal to need by construction, so the ranking cannot be the need
+        map wearing a different name; a plain need - service difference is not (see `metric`).
+        """
+        _x = pl.when(pl.col(service_col).is_not_null()).then(pl.col(need_col))  # only pairs the fit can use
+        _y = pl.col(service_col)
+        _xm, _ym = _x.mean().over("domain"), _y.mean().over("domain")
+        _sxx = ((_x - _xm) ** 2).sum().over("domain")
+        _slope = pl.when(_sxx > 0).then(((_x - _xm) * (_y - _ym)).sum().over("domain") / _sxx).otherwise(0.0)
+        return -(_y - (_ym + _slope * (pl.col(need_col) - _xm)))
+
+    def score_areas(requests_311, housing, areas, *, snapshot_ts, window_days, fix_days, per, metric="residual"):
         """Need and service per area and topic, as raw rates and percentiles, plus the gap.
 
         Service is always a share of need in the same topic (never a count per resident or parcel),
         so an area does not look well served just because it has a lot of problems.
+
+        `metric="residual"` scores the gap as how far below the fitted service-on-need line an area
+        sits. `metric="difference"` is the original need_pct - service_pct, kept for comparison: it
+        ranks areas at Spearman +0.88 with need alone, so it is close to a relabelled need map.
         """
         _end = datetime.fromisoformat(snapshot_ts)
         _start = _end - timedelta(days=window_days) if window_days else datetime(1900, 1, 1)
@@ -993,10 +1011,11 @@ def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta
             )
         )
 
+        _gap = neglect_residual() if metric == "residual" else pl.col("need_pct") - pl.col("service_pct")
         return (
             pl.concat([_s311, _svac], how="diagonal")
             .with_columns(pct_rank("need_rate").alias("need_pct"), pct_rank("_service_mix").alias("service_pct"))
-            .with_columns((pl.col("need_pct") - pl.col("service_pct")).alias("gap"))
+            .with_columns(_gap.alias("gap"))
             .drop("_service_mix")
         )
 
@@ -1024,7 +1043,7 @@ def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta
             .sort("gap", descending=True)
             .with_row_index("rank", offset=1)
         )
-    return score_areas, summarize
+    return neglect_residual, score_areas, summarize
 
 
 @app.cell
@@ -1754,14 +1773,14 @@ def _(mo, overall, robust, pl, fix_days, window, per):
 
 
 @app.cell
-def _(VACANCY, alt, default_scores, mo, pl, spearman):
+def _(VACANCY, alt, default_scores, mo, neglect_residual, pl, spearman):
     _v = default_scores.filter(pl.col("domain") == VACANCY).with_columns(
         ((pl.col("old_service_per_parcel").rank() - 1) / (pl.len() - 1)).alias("old_service_pct")
     )
     _r_old = spearman(_v["need_rate"], _v["old_service_per_parcel"])
     _r_new = spearman(_v["need_rate"], _v["service_rate"])
     _v = _v.with_columns(
-        (pl.col("need_pct") - pl.col("old_service_pct")).alias("gap_old"),
+        neglect_residual("old_service_pct").alias("gap_old"),
     ).with_columns(
         pl.col("gap_old").rank(descending=True, method="min").alias("rank_old"),
         pl.col("gap").rank(descending=True, method="min").alias("rank_new"),
