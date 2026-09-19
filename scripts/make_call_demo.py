@@ -15,6 +15,8 @@ so every mp3 and the transcript are baked into data/demo_call/ ahead of time.
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -66,6 +68,75 @@ DOMAINS = {
     "Dirty streets & alleys", "Rats", "Graffiti", "Trees", "Flooding",
 }
 
+# The unison sequence. One caller sets the scene, then the same sentence comes back in several
+# voices at once. The chorus is assembled in the browser at geographically staggered offsets, so
+# these stay separate files rather than being mixed here.
+STORM_ORIGIN = "Westport/Mount Winans/Lakeland"
+STORM_PREMISE = "Hi, my name is Denise. I'm calling from Westport, down off Annapolis Road."
+STORM_ISSUE = "The streetlights on my block have been out for three weeks."
+
+# Documented public ElevenLabs voices, kept distinct so the chorus sounds like a crowd.
+CHORUS_VOICES = [
+    "21m00Tcm4TlvDq8ikWAM",  # Rachel
+    "AZnzlk1XvdvUeBnXmlld",  # Domi
+    "EXAVITQu4vr4xnSDxMaL",  # Bella
+    "ErXwobaYiN019PkySvjV",  # Antoni
+    "TxGEqnHWrfWFTfGW9XjX",  # Josh
+]
+
+# Roughly 45 s of speech at this bitrate lands near 200 KB, which is the budget for what gets
+# base64-encoded into the notebook.
+MP3_BITRATE = "48k"
+
+
+def read_api_key():
+    """Environment first, then a private file, so the key never has to be typed into a shell."""
+    key = os.environ.get("ELEVENLABS_API_KEY")
+    if key:
+        return key.strip()
+    env_file = Path.home() / ".config" / "elevenlabs.env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            name, _, value = line.partition("=")
+            if name.strip() == "ELEVENLABS_API_KEY":
+                return value.strip().strip("'\"")
+    return None
+
+
+def compress(path):
+    """Down to mono at a low bitrate, if ffmpeg is around. Skipped quietly when it is not."""
+    if not shutil.which("ffmpeg"):
+        return
+    tmp = path.with_suffix(".tmp.mp3")
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
+           "-ac", "1", "-b:a", MP3_BITRATE, str(tmp)]
+    if subprocess.run(cmd, check=False).returncode == 0 and tmp.exists():
+        before, after = path.stat().st_size, tmp.stat().st_size
+        tmp.replace(path)
+        print(f"  compressed {before // 1024} KB -> {after // 1024} KB")
+    elif tmp.exists():
+        tmp.unlink()
+
+
+def make_storm(client, api_key, force):
+    """premise.mp3 plus one issue clip per chorus voice."""
+    wanted = [("premise", STORM_PREMISE, CHORUS_VOICES[0])]
+    wanted += [(f"issue_{i}", STORM_ISSUE, v) for i, v in enumerate(CHORUS_VOICES, start=1)]
+    made = 0
+    for stem, text, voice in wanted:
+        path = OUT_DIR / f"{stem}.mp3"
+        if path.exists() and not force:
+            print(f"{path.name}: already present, skipping (use --force to regenerate)")
+            made += 1
+            continue
+        print(f"{path.name}: synthesizing with voice {voice}")
+        mp3 = synthesize(client, api_key, voice, text)
+        if mp3:
+            path.write_bytes(mp3)
+            compress(path)
+            made += 1
+    return made
+
 
 def validate(calls):
     """Fail loudly here rather than shipping a call the notebook cannot join."""
@@ -104,9 +175,10 @@ def main():
     validate(CALLS)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    api_key = os.environ.get("ELEVENLABS_API_KEY")
+    api_key = read_api_key()
     if not api_key:
-        print("ELEVENLABS_API_KEY not set -- writing transcript.json only, skipping audio.")
+        print("No API key found. Set ELEVENLABS_API_KEY, or put it in ~/.config/elevenlabs.env.")
+        print("Writing transcript.json only, skipping audio -- the notebook plays silent without it.")
 
     records, client = [], httpx.Client() if api_key else None
     try:
@@ -124,6 +196,8 @@ def main():
                     path.write_bytes(mp3)
                     audio = name
             records.append({"id": i, **call, "audio": audio})
+        if api_key:
+            print(f"unison sequence: {make_storm(client, api_key, args.force)} clips ready")
     finally:
         if client:
             client.close()
@@ -134,6 +208,9 @@ def main():
     )
     print(f"wrote {OUT_DIR / 'transcript.json'} ({len(records)} calls, "
           f"{sum(r['audio'] is not None for r in records)} with audio)")
+    total = sum(f.stat().st_size for f in OUT_DIR.glob("*.mp3"))
+    if total:
+        print(f"audio on disk: {total // 1024} KB across {len(list(OUT_DIR.glob('*.mp3')))} files")
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ app = marimo.App(width="medium", app_title="Baltimore Triage", css_file="app.css
 
 @app.cell
 def _():
+    import base64
     import json
     from concurrent.futures import ThreadPoolExecutor
     from datetime import datetime, timedelta
@@ -41,6 +42,7 @@ def _():
         ThreadPoolExecutor,
         alt,
         anywidget,
+        base64,
         datetime,
         httpx,
         json,
@@ -336,6 +338,30 @@ def _(DATA_DIR, call_pick, demo_calls, fix_summary, mo, pl):
 @app.cell
 def _(clock_topic, fix_clock_view, mo):
     mo.vstack([clock_topic, fix_clock_view])
+    return
+
+
+@app.cell
+def _(STORM_ORIGIN, STORM_TOPIC, mo):
+    mo.md(
+        rf"""
+    ### The unison call
+
+    One resident reports a broken streetlight. Then the same call, from all 55 neighborhoods at the
+    same second.
+
+    Those 55 calls did not happen &mdash; that is the point. The model was trained to answer exactly
+    this question, so the map below is its answer to a thought experiment: *file one identical
+    {STORM_TOPIC.lower()} request everywhere, and watch who gets an answer.* Press play, and keep an
+    eye on **{STORM_ORIGIN.split("/")[0]}**, where the call came from.
+    """
+    )
+    return
+
+
+@app.cell
+def _(storm_view):
+    storm_view
     return
 
 
@@ -851,6 +877,13 @@ def _():
     # same-day repair. Left in, it would make potholes look instant.
     BULK_CLOSED = ["TRM-Pickup Pothole"]
 
+    # The sequence. Westport is the slowest area for streetlights, so the call we open on is the one
+    # still glowing at the end: the story closes on the person it started with.
+    STORM_ORIGIN = "Westport/Mount Winans/Lakeland"
+    STORM_TOPIC = "Streetlights"
+    STORM_PREMISE = "Hi, my name is Denise. I'm calling from Westport, down off Annapolis Road."
+    STORM_ISSUE = "The streetlights on my block have been out for three weeks."
+
     # Colors: blue = over-served, orange = under-served (colorblind-safe pair).
     OVER, MID, UNDER = "#2b6cb0", "#f1f1f1", "#dd6b20"
     return (
@@ -870,6 +903,10 @@ def _():
         MIN_REQUESTS,
         OVER,
         ROBUST_SHARE,
+        STORM_ISSUE,
+        STORM_ORIGIN,
+        STORM_PREMISE,
+        STORM_TOPIC,
         UNDER,
         VACANCY,
         VACANCY_SINCE,
@@ -1862,6 +1899,26 @@ def _(areas_geo, np, shapely):
 
 
 @app.cell
+def _(areas_geo, np, project, shapely):
+    # Anchor points for the call cards. A bounding-box centre drifts into the harbour for the
+    # waterfront areas; representative_point is guaranteed to land inside the shape itself.
+    map_centroids = {}
+    for _f in areas_geo["features"]:
+        _p = shapely.geometry.shape(_f["geometry"]).representative_point()
+        _x, _y = project(_p.x, _p.y)
+        map_centroids[_f["properties"]["csa"]] = [round(float(_x), 1), round(float(_y), 1)]
+
+    def bloom_order(origin, centroids):
+        """Areas sorted by distance from the origin, with each one's share of the ripple's width."""
+        _o = centroids[origin]
+        _d = {_c: float(np.hypot(_p[0] - _o[0], _p[1] - _o[1])) for _c, _p in centroids.items()}
+        _far = max(_d.values()) or 1.0
+        return {_c: round(_v / _far, 4) for _c, _v in _d.items()}
+
+    return bloom_order, map_centroids
+
+
+@app.cell
 def _(anywidget, traitlets):
     class TriageExplorer(anywidget.AnyWidget):
         """Clickable gap map + Gap Card in one widget.
@@ -2193,7 +2250,7 @@ def _(anywidget, traitlets):
             let num = 0, den = 0;
             for (const [csa, p] of Object.entries(paths)) {
               const s = sAt(csa, t);
-              if (s === null) { p.setAttribute("fill", "url(#fc-na)"); continue; }
+              if (s === null) { p.setAttribute("fill", "rgba(150,150,150,0.12)"); continue; }
               p.setAttribute("fill", `rgba(${UNDER.join(",")},${(0.06 + 0.94 * s).toFixed(3)})`);
               const n = (model.get("labels")[csa] || {}).n || 0;
               num += s * n; den += n;
@@ -2286,6 +2343,372 @@ def _(anywidget, traitlets):
 
 
 @app.cell
+def _(anywidget, traitlets):
+    class CallStorm(anywidget.AnyWidget):
+        """One call, then the same call from everywhere, then the wait.
+
+        A scripted sequence rather than a chart: a resident reports a problem, the identical report
+        is imagined from all 55 neighborhoods at once, and the map drains at the rate the model
+        predicts for each one. The counterfactual is the point -- those 55 calls did not happen, and
+        the sequence says so on screen before it runs.
+
+        Visual-first by construction. Audio clips are fired at cue times but never drive the clock,
+        so the whole thing plays correctly with no audio present at all.
+        """
+
+        _esm = r"""
+        // One AudioContext for the page. Chrome allows six per process and marimo re-renders
+        // widgets, so this is deliberately module-level rather than per-render.
+        let AC = null;
+        const BUF = {};
+
+        const audio = {
+          ctx() {
+            if (!AC) { const C = window.AudioContext || window.webkitAudioContext; AC = C ? new C() : null; }
+            return AC;
+          },
+          async unlock(clips) {
+            const c = this.ctx(); if (!c) return;
+            if (c.state === "suspended") { try { await c.resume(); } catch (e) {} }
+            for (const [k, uri] of Object.entries(clips || {})) {
+              if (BUF[k] !== undefined) continue;
+              BUF[k] = null;                       // claim the slot so we decode once
+              try {
+                const r = await fetch(uri);
+                BUF[k] = await c.decodeAudioData(await r.arrayBuffer());
+              } catch (e) { BUF[k] = null; }       // a missing clip must never break the sequence
+            }
+          },
+          play(name, when, gain) {
+            const c = this.ctx(), b = BUF[name]; if (!c || !b) return;
+            const s = c.createBufferSource(), g = c.createGain();
+            s.buffer = b; g.gain.value = gain === undefined ? 1 : gain;
+            s.connect(g); g.connect(c.destination); s.start(c.currentTime + (when || 0));
+          },
+          tone(freq, when, dur, gain, type) {
+            const c = this.ctx(); if (!c) return;
+            const t = c.currentTime + (when || 0), o = c.createOscillator(), g = c.createGain();
+            o.type = type || "sine"; o.frequency.value = freq;
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.exponentialRampToValueAtTime(gain, t + 0.012);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+            o.connect(g); g.connect(c.destination); o.start(t); o.stop(t + dur + 0.02);
+          },
+          ring(when) { this.tone(440, when, 1.1, 0.04); this.tone(480, when, 1.1, 0.04); },
+        };
+
+        const RED = [221, 107, 32];
+        const rgba = (a) => `rgba(${RED[0]},${RED[1]},${RED[2]},${a.toFixed(3)})`;
+
+        function render({ model, el }) {
+          const [W, H] = model.get("size");
+          const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+          el.innerHTML = `
+            <div class="cs-wrap">
+              <div class="cs-stage">
+                <svg class="cs-map" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+                  <g class="cs-areas"></g><g class="cs-threads"></g>
+                  <g class="cs-cards"></g><g class="cs-stamps"></g>
+                </svg>
+                <div class="cs-hud">
+                  <div class="cs-phase"></div>
+                  <div class="cs-clock"><span class="cs-dayw">Day <b class="cs-day">0</b></span>
+                    <span class="cs-speed"></span></div>
+                  <div class="cs-count"></div>
+                </div>
+                <div class="cs-board"></div>
+                <div class="cs-cap"></div>
+              </div>
+              <div class="cs-ctrl">
+                <button class="cs-play">Play the call</button>
+                <button class="cs-skip" title="Jump to the final state">Skip to the end</button>
+                <span class="cs-note"></span>
+              </div>
+            </div>`;
+
+          const $ = (c) => el.querySelector(c);
+          const gA = $(".cs-areas"), gT = $(".cs-threads"), gC = $(".cs-cards"), gS = $(".cs-stamps");
+          const elPhase = $(".cs-phase"), elDay = $(".cs-day"), elDayW = $(".cs-dayw");
+          const elSpeed = $(".cs-speed"), elCount = $(".cs-count"), elCap = $(".cs-cap");
+          const elBoard = $(".cs-board"), btn = $(".cs-play"), skip = $(".cs-skip"), note = $(".cs-note");
+
+          const cur = () => model.get("curves") || {};
+          const lab = () => model.get("labels") || {};
+          const cen = () => model.get("centroids") || {};
+          const hz = () => model.get("horizon") || 180;
+          const sAt = (csa, d) => { const c = cur()[csa]; return c ? c[Math.min(Math.round(d), c.length - 1)] / 100 : null; };
+
+          // --- build the map once -------------------------------------------------
+          const paths = {}, cards = {}, stamps = {};
+          for (const sh of model.get("shapes")) {
+            const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            p.setAttribute("d", sh.d); p.setAttribute("class", "cs-area");
+            gA.appendChild(p); paths[sh.csa] = p;
+          }
+
+          const mkCard = (csa, big) => {
+            const c = cen()[csa]; if (!c) return null;
+            const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+            g.setAttribute("class", "cs-card" + (big ? " cs-big" : ""));
+            g.setAttribute("transform", `translate(${c[0]},${c[1]}) scale(0.01)`);
+            const w = big ? 150 : 46, h = big ? 54 : 26;
+            g.innerHTML =
+              `<rect x="${-w / 2}" y="${-h / 2}" width="${w}" height="${h}" rx="${big ? 8 : 6}"></rect>` +
+              [0, 1, 2, 3].map((i) =>
+                `<rect class="cs-bar" x="${-w / 2 + (big ? 14 : 9) + i * (big ? 9 : 7)}" y="-5"
+                       width="${big ? 4 : 3}" height="10" rx="1.5" style="animation-delay:${i * 0.12}s"></rect>`
+              ).join("") +
+              (big ? `<text class="cs-name" x="${-w / 2 + 52}" y="-4">${csa.split("/")[0]}</text>
+                      <text class="cs-sub" x="${-w / 2 + 52}" y="10">311 &middot; connected</text>` : "");
+            gC.appendChild(g); return g;
+          };
+
+          // --- state --------------------------------------------------------------
+          let raf = null, t0 = 0, fired = new Set(), phase = "idle", cdAt = null, running = false;
+          let cleared = [], stampSet = new Set(), timers = [];
+          const CD_A = 12000, CD_DAY_A = 30, CD_B = 9000;   // warped: slow to day 30, then run
+          const dayAt = (e) => e <= CD_A
+            ? (CD_DAY_A * e) / CD_A
+            : CD_DAY_A + (hz() - CD_DAY_A) * Math.min(1, (e - CD_A) / CD_B);
+          const speedAt = (e) => e <= CD_A ? (CD_DAY_A * 1000) / CD_A : ((hz() - CD_DAY_A) * 1000) / CD_B;
+
+          const clearDay = (csa) => { const l = lab()[csa] || {}; return l.clear === undefined ? null : l.clear; };
+
+          const paintDay = (d) => {
+            elDay.textContent = Math.round(d);
+            let open = 0, tot = 0;
+            for (const [csa, p] of Object.entries(paths)) {
+              const s = sAt(csa, d);
+              if (s === null) { p.setAttribute("fill", "rgba(150,150,150,0.10)"); continue; }
+              p.setAttribute("fill", rgba(0.05 + 0.95 * s));
+              const n = (lab()[csa] || {}).n || 0; open += s * n; tot += n;
+              const cd = clearDay(csa);
+              if (cd !== null && d >= cd && !stampSet.has(csa)) {
+                stampSet.add(csa); cleared.push(csa); stamp(csa, cd);
+                // pitched by finish order: the city plays a falling melody as neglect deepens
+                audio.tone(880 * Math.pow(0.945, cleared.length), 0, 0.42, 0.06, "triangle");
+                p.classList.add("cs-pop"); setTimeout(() => p.classList.remove("cs-pop"), 420);
+              }
+            }
+            const tot2 = Object.keys(cur()).length;
+            elCount.innerHTML = `<b>${cleared.length}</b> of ${tot2} neighborhoods answered`;
+            elSpeed.textContent = `${Math.round(speedAt(cdAt === null ? 0 : performance.now() - cdAt))} days/sec`;
+            drawBoard(d);
+          };
+
+          const stamp = (csa, day) => {
+            const c = cen()[csa]; if (!c) return;
+            const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            t.setAttribute("class", "cs-stamp"); t.setAttribute("x", c[0]); t.setAttribute("y", c[1]);
+            t.textContent = day === null ? "—" : "d" + day;
+            gS.appendChild(t);
+          };
+
+          const drawBoard = (d) => {
+            const rows = Object.keys(cur()).map((csa) => ({ csa, s: sAt(csa, d), cd: clearDay(csa) }));
+            rows.sort((a, b) => b.s - a.s);
+            const top = rows.slice(0, 6);
+            elBoard.innerHTML = `<div class="cs-bh">still waiting</div>` + top.map((r) =>
+              `<div class="cs-br"><span>${r.csa.split("/")[0]}</span><b>${Math.round(100 * r.s)}%</b></div>`
+            ).join("");
+          };
+
+          // --- cue handlers -------------------------------------------------------
+          const say = (text, type) => {
+            if (!type || reduce) { elCap.textContent = text; return; }
+            elCap.textContent = ""; let i = 0;
+            const id = setInterval(() => {
+              elCap.textContent = text.slice(0, ++i);
+              if (i >= text.length) clearInterval(id);
+            }, 22);
+            timers.push(id);
+          };
+
+          const bloom = () => {
+            const order = model.get("bloom") || {};
+            const clips = Object.keys(model.get("clips") || {}).filter((k) => k.startsWith("issue"));
+            let i = 0;
+            for (const [csa, frac] of Object.entries(order)) {
+              if (csa === model.get("origin")) continue;
+              const delay = 60 + frac * 2200;                     // ripple across real geography
+              const g = mkCard(csa, false); if (!g) continue;
+              cards[csa] = g;
+              const id = setTimeout(() => {
+                g.classList.add("cs-in");
+                const c = cen()[csa], o = cen()[model.get("origin")];
+                if (o) {
+                  const ln = document.createElementNS("http://www.w3.org/2000/svg", "line");
+                  ln.setAttribute("class", "cs-thread");
+                  ln.setAttribute("x1", o[0]); ln.setAttribute("y1", o[1]);
+                  ln.setAttribute("x2", c[0]); ln.setAttribute("y2", c[1]);
+                  gT.appendChild(ln); setTimeout(() => ln.classList.add("cs-fade"), 500);
+                }
+                if (clips.length) audio.play(clips[i % clips.length], 0, 0.5);
+                i++;
+              }, delay);
+              timers.push(id);
+            }
+          };
+
+          const collapse = () => {
+            for (const g of Object.values(cards)) g.classList.add("cs-out");
+            const og = cards.__origin; if (og) og.classList.add("cs-out");
+            gT.innerHTML = "";
+            for (const p of Object.values(paths)) p.classList.add("cs-lit");
+            elDayW.classList.add("cs-on");
+          };
+
+          const apply = (c) => {
+            if (c.kind === "phase") elPhase.textContent = c.text;
+            else if (c.kind === "caption") say(c.text, c.type);
+            else if (c.kind === "ring") {
+              const p = paths[model.get("origin")];
+              if (p) { p.classList.add("cs-origin"); }
+              audio.ring(0);
+            } else if (c.kind === "origin_card") {
+              const g = mkCard(model.get("origin"), true);
+              if (g) { cards.__origin = g; requestAnimationFrame(() => g.classList.add("cs-in")); }
+            } else if (c.kind === "audio") audio.play(c.clip, 0, c.gain === undefined ? 1 : c.gain);
+            else if (c.kind === "bloom") bloom();
+            else if (c.kind === "collapse") collapse();
+            else if (c.kind === "countdown") { phase = "countdown"; cdAt = performance.now(); }
+            else if (c.kind === "end") finish();
+          };
+
+          const finish = () => {
+            phase = "end";
+            cancelAnimationFrame(raf); raf = null; running = false;
+            paintDay(hz());
+            btn.textContent = "Replay"; btn.disabled = false;
+            const l = lab();
+            const stuck = Object.keys(cur())
+              .map((csa) => ({ csa, s: sAt(csa, hz()) }))
+              .filter((r) => r.s > 0.15).sort((a, b) => b.s - a.s);
+            for (const r of stuck) if (paths[r.csa]) paths[r.csa].classList.add("cs-stuck");
+            elPhase.textContent = "Six months later";
+            elCap.innerHTML = stuck.length
+              ? `<b>${stuck.length}</b> neighborhoods are still waiting: `
+                + stuck.slice(0, 4).map((r) => `${r.csa.split("/")[0]} <b>${Math.round(100 * r.s)}%</b>`).join(" &middot; ")
+                + `. The call we opened with came from <b>${model.get("origin").split("/")[0]}</b>.`
+              : "Every neighborhood was answered inside six months.";
+          };
+
+          const tick = (now) => {
+            const e = now - t0, cues = model.get("cues") || [];
+            for (let i = 0; i < cues.length; i++) {
+              if (!fired.has(i) && e >= cues[i].t) { fired.add(i); apply(cues[i]); }
+            }
+            if (phase === "countdown") {
+              const ce = now - cdAt;
+              paintDay(dayAt(ce));
+              if (ce >= CD_A + CD_B) { finish(); return; }
+            }
+            if (running) raf = requestAnimationFrame(tick);
+          };
+
+          const reset = () => {
+            cancelAnimationFrame(raf); raf = null; running = false; phase = "idle";
+            fired = new Set(); cleared = []; stampSet = new Set();
+            for (const id of timers) clearTimeout(id), clearInterval(id);
+            timers = [];
+            gC.innerHTML = ""; gT.innerHTML = ""; gS.innerHTML = "";
+            for (const k of Object.keys(cards)) delete cards[k];
+            for (const p of Object.values(paths)) p.className.baseVal = "cs-area";
+            elPhase.textContent = ""; elCap.textContent = ""; elCount.textContent = "";
+            elSpeed.textContent = ""; elBoard.innerHTML = ""; elDay.textContent = "0";
+            elDayW.classList.remove("cs-on");
+            for (const [csa, p] of Object.entries(paths)) p.setAttribute("fill", "rgba(150,150,150,0.10)");
+            note.textContent = Object.keys(model.get("clips") || {}).length
+              ? "" : "no audio assets found — playing silent";
+          };
+
+          const start = async () => {
+            reset();
+            btn.disabled = true; btn.textContent = "Playing…";
+            await audio.unlock(model.get("clips"));
+            if (reduce) { phase = "countdown"; finish(); return; }
+            running = true; t0 = performance.now(); raf = requestAnimationFrame(tick);
+          };
+
+          btn.addEventListener("click", start);
+          skip.addEventListener("click", () => {
+            reset(); audio.unlock(model.get("clips"));
+            for (const p of Object.values(paths)) p.classList.add("cs-lit");
+            phase = "countdown"; finish();
+          });
+          model.on("change:curves", reset);
+          reset();
+          return () => { cancelAnimationFrame(raf); for (const id of timers) clearTimeout(id); };
+        }
+        export default { render };
+        """
+
+        _css = r"""
+        .cs-wrap { font: 13px system-ui, -apple-system, sans-serif; }
+        .cs-stage { position: relative; }
+        .cs-map { width: 100%; height: auto; display: block; background: transparent; }
+        .cs-area { stroke: rgba(127,127,127,0.35); stroke-width: 0.6; transition: fill 120ms linear; }
+        .cs-area.cs-lit { stroke: rgba(127,127,127,0.5); }
+        .cs-area.cs-origin { stroke: #dd6b20; stroke-width: 3; animation: cs-pulse 1.1s ease-out 3; }
+        .cs-area.cs-pop { stroke: #2b6cb0; stroke-width: 3; }
+        .cs-area.cs-stuck { stroke: #dd6b20; stroke-width: 2.2; animation: cs-pulse 2.2s ease-in-out infinite; }
+        @keyframes cs-pulse { 0%,100% { stroke-opacity: 1; } 50% { stroke-opacity: 0.25; } }
+
+        .cs-card { opacity: 0; transition: transform 380ms cubic-bezier(.2,1.4,.4,1), opacity 260ms; }
+        .cs-card.cs-in { opacity: 1; }
+        .cs-card rect { fill: #1f2733; stroke: rgba(255,255,255,0.18); stroke-width: 0.8; }
+        .cs-card .cs-bar { fill: #f6ad55; animation: cs-wave 0.7s ease-in-out infinite alternate; }
+        .cs-card.cs-big rect:first-child { fill: #141b24; stroke: #dd6b20; stroke-width: 1.4; }
+        .cs-name { fill: #fff; font: 600 11px system-ui; }
+        .cs-sub { fill: #a0aec0; font: 9px system-ui; }
+        @keyframes cs-wave { from { transform: scaleY(0.35); } to { transform: scaleY(1.5); } }
+        .cs-card.cs-out { opacity: 0; transition: transform 520ms ease-in, opacity 520ms; }
+        .cs-thread { stroke: #dd6b20; stroke-width: 0.8; opacity: 0.55; transition: opacity 700ms; }
+        .cs-thread.cs-fade { opacity: 0; }
+        .cs-stamp { fill: #2b6cb0; font: 600 9px system-ui; text-anchor: middle; }
+
+        .cs-hud { position: absolute; top: 6px; left: 8px; right: 8px; display: flex;
+                  align-items: baseline; gap: 12px; pointer-events: none; }
+        .cs-phase { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: #888; }
+        .cs-clock { margin-left: auto; display: flex; align-items: baseline; gap: 8px; opacity: 0; transition: opacity 400ms; }
+        .cs-dayw.cs-on { opacity: 1; }
+        .cs-clock:has(.cs-on) { opacity: 1; }
+        .cs-day { font-size: 30px; color: #dd6b20; font-variant-numeric: tabular-nums; }
+        .cs-speed { font-size: 11px; color: #999; }
+        .cs-count { position: absolute; top: 34px; right: 0; font-size: 12px; color: #888; }
+        .cs-count b { color: #2b6cb0; font-size: 16px; font-variant-numeric: tabular-nums; }
+
+        .cs-board { position: absolute; right: 8px; bottom: 34px; width: 172px; pointer-events: none;
+                    font-size: 11px; color: #888; }
+        .cs-bh { text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; margin-bottom: 3px; }
+        .cs-br { display: flex; justify-content: space-between; padding: 1px 0; }
+        .cs-br b { color: #dd6b20; font-variant-numeric: tabular-nums; }
+
+        .cs-cap { position: absolute; left: 8px; bottom: 8px; right: 190px; min-height: 34px;
+                  font-size: 15px; line-height: 1.35; color: #e8e8e8; text-shadow: 0 1px 6px rgba(0,0,0,0.6); }
+        .cs-ctrl { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+        .cs-play, .cs-skip { cursor: pointer; border: 1px solid rgba(127,127,127,0.4); border-radius: 4px;
+                             background: transparent; color: inherit; font-size: 12px; padding: 5px 12px; }
+        .cs-play { border-color: #dd6b20; color: #dd6b20; font-weight: 600; }
+        .cs-play:disabled { opacity: 0.5; cursor: default; }
+        .cs-note { font-size: 11px; color: #999; margin-left: auto; }
+        """
+
+        shapes = traitlets.List([]).tag(sync=True)
+        size = traitlets.List([1000, 1000]).tag(sync=True)
+        centroids = traitlets.Dict({}).tag(sync=True)
+        bloom = traitlets.Dict({}).tag(sync=True)
+        curves = traitlets.Dict({}).tag(sync=True)
+        labels = traitlets.Dict({}).tag(sync=True)
+        origin = traitlets.Unicode("").tag(sync=True)
+        cues = traitlets.List([]).tag(sync=True)
+        clips = traitlets.Dict({}).tag(sync=True)
+        horizon = traitlets.Int(180).tag(sync=True)
+    return (CallStorm,)
+
+
+@app.cell
 def _(MAP_SIZE, TriageExplorer, default_overall, map_shapes, mo):
     # Created once, so the selection survives slider moves. Scores and dots are pushed in by the cells below.
     # `?area=Cherry Hill` in the URL opens the app on that area (read once, never re-triggers this cell).
@@ -2305,6 +2728,80 @@ def _(FIX_HORIZON, FixClock, MAP_SIZE, map_shapes, mo):
     clock_widget = FixClock(shapes=map_shapes, size=MAP_SIZE, horizon=FIX_HORIZON)
     fix_clock_view = mo.ui.anywidget(clock_widget)
     return clock_widget, fix_clock_view
+
+
+@app.cell
+def _(CallStorm, FIX_HORIZON, MAP_SIZE, map_centroids, map_shapes, mo):
+    # Created once, like the maps above. Everything else is pushed in through the raw handle.
+    storm_widget = CallStorm(
+        shapes=map_shapes, size=MAP_SIZE, centroids=map_centroids, horizon=FIX_HORIZON
+    )
+    storm_view = mo.ui.anywidget(storm_widget)
+    return storm_view, storm_widget
+
+
+@app.cell
+def _(
+    DATA_DIR,
+    STORM_ISSUE,
+    STORM_ORIGIN,
+    STORM_PREMISE,
+    STORM_TOPIC,
+    base64,
+    bloom_order,
+    fix_clock,
+    fix_summary,
+    map_centroids,
+    np,
+    pl,
+    storm_widget,
+):
+    def storm_cues(premise, issue):
+        """The running order, in milliseconds. Audio is fired at these marks but never drives them."""
+        return [
+            {"t": 0, "kind": "phase", "text": "Dialling 311"},
+            {"t": 150, "kind": "ring"},
+            {"t": 1100, "kind": "origin_card"},
+            {"t": 1500, "kind": "audio", "clip": "premise"},
+            {"t": 1500, "kind": "caption", "text": premise, "type": True},
+            {"t": 8600, "kind": "phase", "text": "Now the same call, from every neighborhood at once"},
+            {"t": 8800, "kind": "caption", "text": "", "type": False},
+            {"t": 8900, "kind": "bloom"},
+            {"t": 12300, "kind": "caption", "text": issue, "type": False},
+            {"t": 14600, "kind": "phase", "text": "Reported"},
+            {"t": 14800, "kind": "collapse"},
+            {"t": 15900, "kind": "phase", "text": "Waiting"},
+            {"t": 15900, "kind": "countdown"},
+        ]
+
+    def storm_clips(data_dir):
+        """Audio as base64 data URIs: the only transport that survives both run and static export."""
+        _d = data_dir / "demo_call"
+        return {
+            _f.stem: "data:audio/mpeg;base64," + base64.b64encode(_f.read_bytes()).decode()
+            for _f in (sorted(_d.glob("*.mp3")) if _d.exists() else [])
+        }
+
+    _rows = fix_summary.filter(
+        (pl.col("domain") == STORM_TOPIC) & pl.col("csa").is_in(list(map_centroids))
+    )
+    _idx = {(_d, _c): _i for _i, (_d, _c) in enumerate(fix_clock["cells"].iter_rows())}
+    _S = fix_clock["S"]
+
+    storm_widget.curves = {
+        _r["csa"]: np.rint(_S[_idx[(STORM_TOPIC, _r["csa"])]] * 100).astype(int).tolist()
+        for _r in _rows.iter_rows(named=True)
+    }
+    storm_widget.labels = {
+        _r["csa"]: {"n": _r["n"], "clear": _r["median_days"],
+                    "open180": round(float(_r["still_open_at_horizon"]), 3)}
+        for _r in _rows.iter_rows(named=True)
+    }
+    storm_widget.origin = STORM_ORIGIN
+    storm_widget.bloom = bloom_order(STORM_ORIGIN, map_centroids)
+    storm_widget.cues = storm_cues(STORM_PREMISE, STORM_ISSUE)
+    storm_widget.clips = storm_clips(DATA_DIR)
+    return
 
 
 @app.cell
