@@ -352,8 +352,12 @@ def _(STORM_ORIGIN, STORM_TOPIC, mo):
 
     Those 55 calls did not happen &mdash; that is the point. The model was trained to answer exactly
     this question, so the map below is its answer to a thought experiment: *file one identical
-    {STORM_TOPIC.lower()} request everywhere, and watch who gets an answer.* Press play, and keep an
-    eye on **{STORM_ORIGIN.split("/")[0]}**, where the call came from.
+    {STORM_TOPIC.lower()} request everywhere, and watch who gets an answer.*
+
+    An area turns green once **three in four** of its reports are closed. That is the bar because no
+    neighborhood ever reaches zero here: the best still has 7% of its streetlight reports open six
+    months later, and the worst has 38%. Press play, and keep an eye on
+    **{STORM_ORIGIN.split("/")[0]}**, where the call came from.
     """
     )
     return
@@ -881,8 +885,16 @@ def _():
     # still glowing at the end: the story closes on the person it started with.
     STORM_ORIGIN = "Westport/Mount Winans/Lakeland"
     STORM_TOPIC = "Streetlights"
-    STORM_PREMISE = "Hi, my name is Denise. I'm calling from Westport, down off Annapolis Road."
-    STORM_ISSUE = "The streetlights on my block have been out for three weeks."
+    # Kept identical to scripts/make_call_demo.py, because these are the captions for those clips.
+    STORM_PREMISE = (
+        "Hi... yeah, hi. My name's Denise. I'm over in Westport, just off Annapolis Road. "
+        "I've called about this before, honestly."
+    )
+    STORM_ISSUE = "The streetlights on my block have been out. Three weeks now."
+    # An area counts as answered when three in four of its reports are closed. Half is too generous
+    # to mean anything here -- every area passes it inside three weeks -- and no area in this topic
+    # ever reaches zero, so demanding all of them would paint the whole city as failing forever.
+    STORM_ANSWERED = 0.25
 
     # Colors: blue = over-served, orange = under-served (colorblind-safe pair).
     OVER, MID, UNDER = "#2b6cb0", "#f1f1f1", "#dd6b20"
@@ -903,6 +915,7 @@ def _():
         MIN_REQUESTS,
         OVER,
         ROBUST_SHARE,
+        STORM_ANSWERED,
         STORM_ISSUE,
         STORM_ORIGIN,
         STORM_PREMISE,
@@ -2219,7 +2232,7 @@ def _(anywidget, traitlets):
                 </select>
               </div>
               <div class="fc-legend">
-                <span>all fixed</span><span class="fc-grad"></span><span>all still open</span>
+                <span>3 in 4 closed</span><span class="fc-grad"></span><span>none closed</span>
                 <span class="fc-hint">hover an area</span>
               </div>
             </div>`;
@@ -2257,7 +2270,7 @@ def _(anywidget, traitlets):
             for (const [csa, p] of Object.entries(paths)) {
               const s = sAt(csa, t);
               if (s === null) { p.setAttribute("fill", "rgba(150,150,150,0.12)"); continue; }
-              p.setAttribute("fill", shade(s));
+              p.setAttribute("fill", shade(s, barOf()));
               const n = (model.get("labels")[csa] || {}).n || 0;
               num += s * n; den += n;
             }
@@ -2403,14 +2416,17 @@ def _(anywidget, traitlets):
           ring(when) { this.tone(440, when, 1.1, 0.04); this.tone(480, when, 1.1, 0.04); },
         };
 
-        // Still open is red, answered is green, and the midpoint is amber. Lightness climbs as well
-        // as hue, so the ramp still reads as an order for anyone who cannot separate red from green.
-        const RAMP = [[45, 158, 96], [226, 168, 62], [200, 56, 44]];
+        // Green is not "some progress", it is "this area cleared the bar": three in four reports
+        // closed. Below the bar the greens deepen; above it the ramp runs amber to red by how far
+        // short it fell. The step at the bar is deliberate -- crossing it is the event worth seeing,
+        // and a smooth ramp let areas sitting on a sixth of their reports still look answered.
+        const DEEP = [26, 132, 78], MINT = [138, 196, 116];
+        const AMBER = [226, 168, 62], RED = [196, 52, 42];
         const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
-        const shade = (s) => {
+        const shade = (s, bar) => {
           const t = Math.max(0, Math.min(1, s));
-          const [a, b, f] = t < 0.5 ? [RAMP[0], RAMP[1], t / 0.5] : [RAMP[1], RAMP[2], (t - 0.5) / 0.5];
-          return `rgb(${mix(a, b, f).join(",")})`;
+          if (t <= bar) return `rgb(${mix(DEEP, MINT, bar ? t / bar : 0).join(",")})`;
+          return `rgb(${mix(AMBER, RED, Math.min(1, (t - bar) / (1 - bar))).join(",")})`;
         };
 
         function render({ model, el }) {
@@ -2453,6 +2469,7 @@ def _(anywidget, traitlets):
           const lab = () => model.get("labels") || {};
           const cen = () => model.get("centroids") || {};
           const hz = () => model.get("horizon") || 180;
+          const barOf = () => model.get("answered") || 0.25;
           const sAt = (csa, d) => { const c = cur()[csa]; return c ? c[Math.min(Math.round(d), c.length - 1)] / 100 : null; };
 
           // --- build the map once -------------------------------------------------
@@ -2510,7 +2527,7 @@ def _(anywidget, traitlets):
           const fillsAt = (d) => {
             for (const [csa, p] of Object.entries(paths)) {
               const s = sAt(csa, d);
-              p.setAttribute("fill", s === null ? "rgba(255,255,255,0.10)" : shade(s));
+              p.setAttribute("fill", s === null ? "rgba(255,255,255,0.10)" : shade(s, barOf()));
             }
           };
 
@@ -2520,7 +2537,7 @@ def _(anywidget, traitlets):
             for (const [csa, p] of Object.entries(paths)) {
               const s = sAt(csa, d);
               if (s === null) { p.setAttribute("fill", "rgba(255,255,255,0.10)"); continue; }
-              p.setAttribute("fill", shade(s));
+              p.setAttribute("fill", shade(s, barOf()));
               // The longer an area sits unanswered while its neighbours resolve, the angrier its
               // outline gets. The fill still carries the number; this only draws the eye to it.
               const rot = s > 0.5 ? Math.min(1, (d / hz()) * 1.6 * s) : 0;
@@ -2542,7 +2559,7 @@ def _(anywidget, traitlets):
               }
             }
             const tot2 = Object.keys(cur()).length;
-            elCount.innerHTML = `<b>${cleared.length}</b> of ${tot2} neighborhoods answered`;
+            elCount.innerHTML = `<b>${cleared.length}</b> of ${tot2} past three in four`;
             elBar.classList.add("cs-on");
             elBarDone.style.width = `${(100 * cleared.length) / Math.max(tot2, 1)}%`;
             elSpeed.textContent = `${Math.round(speedAt(cdAt === null ? 0 : performance.now() - cdAt))} days/sec`;
@@ -2721,7 +2738,7 @@ def _(anywidget, traitlets):
             btn.textContent = "Replay"; btn.disabled = false;
 
             const rows = Object.keys(cur()).map((csa) => ({ csa, s: sAt(csa, hz()) }));
-            const stuck = rows.filter((r) => r.s > 0.12).sort((a, b) => b.s - a.s);
+            const stuck = rows.filter((r) => clearDay(r.csa) === null).sort((a, b) => b.s - a.s);
             const origin = model.get("origin");
             const me = rows.find((r) => r.csa === origin);
 
@@ -2733,7 +2750,7 @@ def _(anywidget, traitlets):
               const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
               t.setAttribute("class", "cs-tag"); t.setAttribute("x", c[0]); t.setAttribute("y", c[1]);
               t.innerHTML = `${r.csa.split("/")[0]}<tspan x="${c[0]}" dy="15">`
-                + `${Math.round(100 * r.s)}% still waiting</tspan>`;
+                + `${Math.round(100 * r.s)}% never answered</tspan>`;
               gS.appendChild(t);
               if (paths[r.csa]) paths[r.csa].classList.add("cs-stuck");
             }
@@ -2741,12 +2758,14 @@ def _(anywidget, traitlets):
             elPhase.textContent = "Six months later";
             elCap.textContent = "";
             elEnd.innerHTML = stuck.length
-              ? `<div class="cs-end-n"><b>${rows.length - stuck.length}</b> of ${rows.length} answered</div>
-                 <div class="cs-end-s"><b>${stuck.length}</b> still waiting after ${hz()} days</div>
-                 <div class="cs-end-o">The call came from ${origin.split("/")[0]}, still
-                   <b>${Math.round(100 * (me ? me.s : 0))}%</b> unanswered.</div>`
-              : `<div class="cs-end-n"><b>all ${rows.length}</b> answered</div>
-                 <div class="cs-end-s">every neighborhood inside ${hz()} days</div>`;
+              ? `<div class="cs-end-n"><b>${rows.length - stuck.length}</b> of ${rows.length} got
+                   three in four reports closed</div>
+                 <div class="cs-end-s"><b>${stuck.length}</b> never did, in ${hz()} days</div>
+                 <div class="cs-end-o">Denise called from ${origin.split("/")[0]}. Six months on,
+                   <b>${Math.round(100 * (me ? me.s : 0))}%</b> of its streetlight reports are
+                   still open &mdash; the worst in the city.</div>`
+              : `<div class="cs-end-n"><b>all ${rows.length}</b> got three in four closed</div>
+                 <div class="cs-end-s">inside ${hz()} days</div>`;
             elEnd.classList.add("cs-on");
           };
 
@@ -2902,6 +2921,7 @@ def _(anywidget, traitlets):
         cues = traitlets.List([]).tag(sync=True)
         clips = traitlets.Dict({}).tag(sync=True)
         horizon = traitlets.Int(180).tag(sync=True)
+        answered = traitlets.Float(0.25).tag(sync=True)
     return (CallStorm,)
 
 
@@ -2940,6 +2960,7 @@ def _(CallStorm, FIX_HORIZON, MAP_SIZE, map_centroids, map_shapes, mo):
 @app.cell
 def _(
     DATA_DIR,
+    STORM_ANSWERED,
     STORM_ISSUE,
     STORM_ORIGIN,
     STORM_PREMISE,
@@ -2999,11 +3020,20 @@ def _(
         _r["csa"]: np.rint(_S[_idx[(STORM_TOPIC, _r["csa"])]] * 100).astype(int).tolist()
         for _r in _rows.iter_rows(named=True)
     }
+    def _answered_on(curve, threshold):
+        """First day three in four of an area's reports are closed, or None if that never happens."""
+        _hit = curve <= threshold
+        return int(np.argmax(_hit)) if _hit.any() else None
+
     storm_widget.labels = {
-        _r["csa"]: {"n": _r["n"], "clear": _r["median_days"],
-                    "open180": round(float(_r["still_open_at_horizon"]), 3)}
+        _r["csa"]: {
+            "n": _r["n"],
+            "clear": _answered_on(_S[_idx[(STORM_TOPIC, _r["csa"])]], STORM_ANSWERED),
+            "open180": round(float(_r["still_open_at_horizon"]), 3),
+        }
         for _r in _rows.iter_rows(named=True)
     }
+    storm_widget.answered = STORM_ANSWERED
     storm_widget.origin = STORM_ORIGIN
     storm_widget.bloom = bloom_order(STORM_ORIGIN, map_centroids)
     storm_widget.cues = storm_cues(STORM_PREMISE, STORM_ISSUE)
