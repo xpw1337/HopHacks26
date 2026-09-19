@@ -1,0 +1,4 @@
+__pycache__/
+__marimo__/
+*.pyc
+.venv/

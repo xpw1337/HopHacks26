@@ -1,0 +1,20 @@
+{
+  "snapshot_date": "2026-09-18",
+  "snapshot_ts": "2026-09-18T04:52:32",
+  "built_at": "2026-09-19T03:24:03",
+  "counts": {
+    "requests_311": 235132,
+    "open_notices": 11481,
+    "rehabs": 12947,
+    "demolitions": 4280,
+    "parcels": 234952,
+    "areas": 55,
+    "population": 583623
+  },
+  "dropped": {
+    "requests_fetched": 252719,
+    "duplicate_or_transferred": 17218,
+    "requests_outside_areas": 369,
+    "housing_outside_areas": 0
+  }
+}
