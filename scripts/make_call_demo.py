@@ -72,8 +72,11 @@ DOMAINS = {
 # voices at once. The chorus is assembled in the browser at geographically staggered offsets, so
 # these stay separate files rather than being mixed here.
 STORM_ORIGIN = "Westport/Mount Winans/Lakeland"
-STORM_PREMISE = "Hi, my name is Denise. I'm calling from Westport, down off Annapolis Road."
-STORM_ISSUE = "The streetlights on my block have been out for three weeks."
+STORM_PREMISE = (
+    "Hi... yeah, hi. My name's Denise. I'm over in Westport, just off Annapolis Road. "
+    "I've called about this before, honestly."
+)
+STORM_ISSUE = "The streetlights on my block have been out. Three weeks now."
 
 # Documented public ElevenLabs voices, kept distinct so the chorus sounds like a crowd.
 CHORUS_VOICES = [
@@ -84,9 +87,12 @@ CHORUS_VOICES = [
     "TxGEqnHWrfWFTfGW9XjX",  # Josh
 ]
 
-# Roughly 45 s of speech at this bitrate lands near 200 KB, which is the budget for what gets
-# base64-encoded into the notebook.
-MP3_BITRATE = "48k"
+# 96 kbps mono keeps speech clean. 48 kbps saved space but put a fizz on every sibilant, which read
+# as "robotic" far more than the model choice did.
+MP3_BITRATE = "96k"
+
+# Eleven v3 is markedly more expressive than multilingual_v2 for short conversational lines.
+MODEL_ID = "eleven_v3"
 
 
 def read_api_key():
@@ -116,6 +122,67 @@ def compress(path):
         print(f"  compressed {before // 1024} KB -> {after // 1024} KB")
     elif tmp.exists():
         tmp.unlink()
+
+
+SFX_URL = "https://api.elevenlabs.io/v1/sound-generation"
+MUSIC_URL = "https://api.elevenlabs.io/v1/music"
+
+# Sound design, generated rather than sourced. A real ring beats a synthesised one, and the
+# underscore is what turns a chart animation into something you sit through.
+SFX = {
+    "sfx_ring": ("an old telephone ringing twice, dry close recording, no room", 3.5),
+    "sfx_burst": ("a deep sub impact with a short upward whoosh, cinematic transition", 2.0),
+}
+MUSIC_PROMPT = (
+    "Tense minimal underscore for a documentary. Slow pulse, low strings, sparse piano, "
+    "no drums, no melody, restrained and patient, building very slightly."
+)
+MUSIC_MS = 22000
+
+
+def post_audio(client, api_key, url, payload, label):
+    """Shared POST for the non-speech endpoints, with the same never-raise contract."""
+    try:
+        r = client.post(url, headers={"xi-api-key": api_key, "accept": "audio/mpeg"},
+                        json=payload, timeout=240)
+        r.raise_for_status()
+        return r.content
+    except httpx.HTTPStatusError as e:
+        print(f"  {label}: ElevenLabs returned {e.response.status_code}: {e.response.text[:200].strip()}")
+    except httpx.HTTPError as e:
+        print(f"  {label}: request failed: {type(e).__name__}: {e}")
+    return None
+
+
+def make_sound_design(client, api_key, force):
+    """Sound effects and one music bed. Skipped silently if the account cannot reach them."""
+    made = 0
+    for stem, (prompt, secs) in SFX.items():
+        path = OUT_DIR / f"{stem}.mp3"
+        if path.exists() and not force:
+            print(f"{path.name}: already present, skipping")
+            made += 1
+            continue
+        print(f"{path.name}: generating sound effect")
+        mp3 = post_audio(client, api_key, SFX_URL,
+                         {"text": prompt, "duration_seconds": secs, "prompt_influence": 0.6}, stem)
+        if mp3:
+            path.write_bytes(mp3)
+            compress(path)
+            made += 1
+
+    path = OUT_DIR / "sfx_bed.mp3"
+    if path.exists() and not force:
+        print(f"{path.name}: already present, skipping")
+        return made + 1
+    print(f"{path.name}: generating {MUSIC_MS // 1000}s underscore")
+    mp3 = post_audio(client, api_key, MUSIC_URL,
+                     {"prompt": MUSIC_PROMPT, "music_length_ms": MUSIC_MS}, "sfx_bed")
+    if mp3:
+        path.write_bytes(mp3)
+        compress(path)
+        made += 1
+    return made
 
 
 def make_storm(client, api_key, force):
@@ -148,13 +215,27 @@ def validate(calls):
 
 
 def synthesize(client, api_key, voice_id, text):
-    """Return mp3 bytes, or None with a readable message if ElevenLabs refuses."""
+    """Return mp3 bytes, or None with a readable message if ElevenLabs refuses.
+
+    Low stability is what stops this sounding like a station announcement: the default keeps the
+    delivery flat, and these are meant to be people who are fed up rather than a narrator.
+    """
     try:
         r = client.post(
             TTS_URL.format(voice_id=voice_id),
             headers={"xi-api-key": api_key, "accept": "audio/mpeg"},
-            json={"text": text, "model_id": "eleven_multilingual_v2"},
-            timeout=120,
+            params={"output_format": "mp3_44100_128"},
+            json={
+                "text": text,
+                "model_id": MODEL_ID,
+                "voice_settings": {
+                    "stability": 0.32,
+                    "similarity_boost": 0.75,
+                    "style": 0.45,
+                    "use_speaker_boost": True,
+                },
+            },
+            timeout=180,
         )
         r.raise_for_status()
         return r.content
@@ -199,6 +280,7 @@ def main():
             records.append({"id": i, **call, "audio": audio})
         if api_key:
             print(f"unison sequence: {make_storm(client, api_key, args.force)} clips ready")
+            print(f"sound design: {make_sound_design(client, api_key, args.force)} assets ready")
     finally:
         if client:
             client.close()

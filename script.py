@@ -2408,7 +2408,7 @@ def _(anywidget, traitlets):
             <div class="cs-wrap">
               <div class="cs-stage">
                 <svg class="cs-map" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
-                  <g class="cs-areas"></g><g class="cs-threads"></g>
+                  <g class="cs-areas"></g><g class="cs-rings"></g>
                   <g class="cs-cards"></g><g class="cs-stamps"></g>
                 </svg>
                 <div class="cs-hud">
@@ -2428,7 +2428,7 @@ def _(anywidget, traitlets):
             </div>`;
 
           const $ = (c) => el.querySelector(c);
-          const gA = $(".cs-areas"), gT = $(".cs-threads"), gC = $(".cs-cards"), gS = $(".cs-stamps");
+          const gA = $(".cs-areas"), gR = $(".cs-rings"), gC = $(".cs-cards"), gS = $(".cs-stamps");
           const elPhase = $(".cs-phase"), elDay = $(".cs-day"), elDayW = $(".cs-dayw");
           const elSpeed = $(".cs-speed"), elCount = $(".cs-count"), elCap = $(".cs-cap");
           const elBoard = $(".cs-board"), btn = $(".cs-play"), skip = $(".cs-skip"), note = $(".cs-note");
@@ -2447,11 +2447,25 @@ def _(anywidget, traitlets):
             gA.appendChild(p); paths[sh.csa] = p;
           }
 
+          // Cards are drawn in map units, so they must be counter-scaled as the camera moves or they
+          // balloon when it pushes in. place() is the single place that owns a card's transform.
+          let camScale = 1;
+          const place = (csa, g, grown) => {
+            const c = cen()[csa]; if (!c) return;
+            const k = (grown ? 1 : 0.01) * camScale;
+            g.setAttribute("transform", `translate(${c[0]},${c[1]}) scale(${k})`);
+          };
+          const rescale = () => {
+            for (const [csa, g] of Object.entries(cards)) {
+              place(csa === "__origin" ? model.get("origin") : csa, g, g.classList.contains("cs-in"));
+            }
+          };
+
           const mkCard = (csa, big) => {
             const c = cen()[csa]; if (!c) return null;
             const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
             g.setAttribute("class", "cs-card" + (big ? " cs-big" : ""));
-            g.setAttribute("transform", `translate(${c[0]},${c[1]}) scale(0.01)`);
+            g.setAttribute("transform", `translate(${c[0]},${c[1]}) scale(${0.01 * camScale})`);
             const w = big ? 150 : 46, h = big ? 54 : 26;
             g.innerHTML =
               `<rect x="${-w / 2}" y="${-h / 2}" width="${w}" height="${h}" rx="${big ? 8 : 6}"></rect>` +
@@ -2525,36 +2539,116 @@ def _(anywidget, traitlets):
             timers.push(id);
           };
 
+          const issueClips = () =>
+            Object.keys(model.get("clips") || {}).filter((k) => k.startsWith("issue_")).sort();
+
+          const ring = (x, y, r1, ms, cls) => {
+            const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+            c.setAttribute("class", "cs-ring " + (cls || ""));
+            c.setAttribute("cx", x); c.setAttribute("cy", y); c.setAttribute("r", 1);
+            gR.appendChild(c);
+            requestAnimationFrame(() => {
+              c.style.transition = `r ${ms}ms linear, opacity ${ms}ms ease-out`;
+              c.setAttribute("r", r1); c.style.opacity = "0";
+            });
+            const id = setTimeout(() => c.remove(), ms + 120);
+            timers.push(id);
+          };
+
+          const mapSpan = () => Math.hypot(W, H);
+
+          const svg = $(".cs-map");
+          const FULL = [0, 0, W, H];
+          let view = FULL.slice(), camAnim = null;
+
+          const applyView = () => {
+            svg.setAttribute("viewBox", view.map((v) => v.toFixed(1)).join(" "));
+            camScale = view[2] / W;
+            rescale();
+          };
+
+          const camera = (target, ms) => {
+            const from = view.slice(), t0 = performance.now();
+            cancelAnimationFrame(camAnim);
+            const step = (now) => {
+              const t = Math.min(1, (now - t0) / ms);
+              const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;   // easeInOutQuad
+              view = from.map((v, i) => v + (target[i] - v) * e);
+              applyView();
+              if (t < 1) camAnim = requestAnimationFrame(step);
+            };
+            camAnim = requestAnimationFrame(step);
+          };
+
+          const boxOf = (csa) => (model.get("shapes").find((x) => x.csa === csa) || {}).box;
+
+          const camTo = (csa, pad, ms) => {
+            const b = boxOf(csa); if (!b) { camera(FULL, ms); return; }
+            const [x, y, w, h] = b;
+            let tw = w * pad, th = h * pad;
+            if (tw / th > W / H) th = (tw * H) / W; else tw = (th * W) / H;
+            camera([x + w / 2 - tw / 2, y + h / 2 - th / 2, tw, th], ms);
+          };
+
+          // The ripple only has to read as "it is spreading". Voicing all 52 at once was a smear,
+          // so a handful speak here and the whole city speaks together on the unison beat.
+          const RIPPLE = 1250;
+
           const bloom = () => {
-            const order = model.get("bloom") || {};
-            const clips = Object.keys(model.get("clips") || {}).filter((k) => k.startsWith("issue"));
-            let i = 0;
-            for (const [csa, frac] of Object.entries(order)) {
-              if (csa === model.get("origin")) continue;
-              const delay = 60 + frac * 2200;                     // ripple across real geography
-              const g = mkCard(csa, false); if (!g) continue;
+            const order = Object.entries(model.get("bloom") || {})
+              .filter(([csa]) => csa !== model.get("origin"))
+              .sort((a, b) => a[1] - b[1]);
+            const clips = issueClips();
+            const voiceEvery = Math.max(1, Math.floor(order.length / 6));
+            const o = cen()[model.get("origin")];
+            // One wave leaving her block. Each area answers as the front reaches it, so the spread
+            // is something you watch travel rather than a diagram of lines.
+            if (o) ring(o[0], o[1], mapSpan(), RIPPLE, "cs-front");
+            order.forEach(([csa, frac], n) => {
+              const delay = 40 + frac * RIPPLE;
+              const g = mkCard(csa, false); if (!g) return;
               cards[csa] = g;
               const id = setTimeout(() => {
-                g.classList.add("cs-in");
-                const c = cen()[csa], o = cen()[model.get("origin")];
-                if (o) {
-                  const ln = document.createElementNS("http://www.w3.org/2000/svg", "line");
-                  ln.setAttribute("class", "cs-thread");
-                  ln.setAttribute("x1", o[0]); ln.setAttribute("y1", o[1]);
-                  ln.setAttribute("x2", c[0]); ln.setAttribute("y2", c[1]);
-                  gT.appendChild(ln); setTimeout(() => ln.classList.add("cs-fade"), 500);
+                g.classList.add("cs-in"); place(csa, g, true);
+                const c = cen()[csa];
+                if (c) ring(c[0], c[1], 55, 620, "cs-echo");
+                if (paths[csa]) {
+                  paths[csa].classList.add("cs-hit");
+                  setTimeout(() => paths[csa].classList.remove("cs-hit"), 520);
                 }
-                if (clips.length) audio.play(clips[i % clips.length], 0, 0.5);
-                i++;
+                if (clips.length && n % voiceEvery === 0) {
+                  audio.play(clips[(n / voiceEvery) % clips.length | 0], 0, 0.22);
+                }
               }, delay);
               timers.push(id);
+            });
+          };
+
+          // Every voice at once, a few milliseconds apart so it thickens instead of phasing.
+          const unison = () => {
+            const clips = issueClips();
+            audio.play("sfx_burst", 0, 0.7);
+            clips.forEach((k, i) => audio.play(k, i * 0.012, 0.95));
+            // A ring out of every neighborhood on the same frame. Simultaneity is the whole point,
+            // so nothing here is staggered.
+            for (const [csa, c] of Object.entries(cen())) {
+              if (!paths[csa]) continue;
+              ring(c[0], c[1], 130, 900, "cs-burst");
             }
+            for (const g of Object.values(cards)) g.classList.add("cs-shout");
+            for (const p of Object.values(paths)) p.classList.add("cs-shout-a");
+            setTimeout(() => {
+              for (const g of Object.values(cards)) g.classList.remove("cs-shout");
+              for (const p of Object.values(paths)) p.classList.remove("cs-shout-a");
+            }, 900);
           };
 
           const collapse = () => {
-            for (const g of Object.values(cards)) g.classList.add("cs-out");
-            const og = cards.__origin; if (og) og.classList.add("cs-out");
-            gT.innerHTML = "";
+            for (const [csa, g] of Object.entries(cards)) {
+              g.classList.add("cs-out");
+              place(csa === "__origin" ? model.get("origin") : csa, g, false);
+            }
+            gR.innerHTML = "";
             for (const p of Object.values(paths)) p.classList.add("cs-lit");
             elDayW.classList.add("cs-on");
           };
@@ -2565,14 +2659,27 @@ def _(anywidget, traitlets):
             else if (c.kind === "ring") {
               const p = paths[model.get("origin")];
               if (p) { p.classList.add("cs-origin"); }
-              audio.ring(0);
+              const _o = cen()[model.get("origin")];
+              if (_o) ring(_o[0], _o[1], 110, 1200, "cs-echo");
+              if (BUF["sfx_ring"]) audio.play("sfx_ring", 0, 0.85); else audio.ring(0);
             } else if (c.kind === "origin_card") {
               const g = mkCard(model.get("origin"), true);
-              if (g) { cards.__origin = g; requestAnimationFrame(() => g.classList.add("cs-in")); }
+              if (g) {
+                cards.__origin = g;
+                requestAnimationFrame(() => { g.classList.add("cs-in"); place(model.get("origin"), g, true); });
+              }
             } else if (c.kind === "audio") audio.play(c.clip, 0, c.gain === undefined ? 1 : c.gain);
+            else if (c.kind === "camera") {
+              if (c.to === "full") camera(FULL, c.ms || 1600);
+              else camTo(model.get("origin"), c.pad || 4.2, c.ms || 1400);
+            }
             else if (c.kind === "bloom") bloom();
+            else if (c.kind === "unison") unison();
             else if (c.kind === "collapse") collapse();
-            else if (c.kind === "countdown") { phase = "countdown"; cdAt = performance.now(); }
+            else if (c.kind === "countdown") {
+              phase = "countdown"; cdAt = performance.now();
+              audio.play("sfx_bed", 0, 0.5);   // 22s of underscore over a ~21s countdown
+            }
             else if (c.kind === "end") finish();
           };
 
@@ -2612,7 +2719,8 @@ def _(anywidget, traitlets):
             fired = new Set(); cleared = []; stampSet = new Set();
             for (const id of timers) clearTimeout(id), clearInterval(id);
             timers = [];
-            gC.innerHTML = ""; gT.innerHTML = ""; gS.innerHTML = "";
+            gC.innerHTML = ""; gR.innerHTML = ""; gS.innerHTML = "";
+            cancelAnimationFrame(camAnim); view = FULL.slice(); applyView();
             for (const k of Object.keys(cards)) delete cards[k];
             for (const p of Object.values(paths)) p.className.baseVal = "cs-area";
             elPhase.textContent = ""; elCap.textContent = ""; elCount.textContent = "";
@@ -2646,10 +2754,14 @@ def _(anywidget, traitlets):
 
         _css = r"""
         .cs-wrap { font: 13px system-ui, -apple-system, sans-serif; }
-        .cs-stage { position: relative; }
-        .cs-map { width: 100%; height: auto; display: block; background: transparent; }
-        .cs-area { stroke: rgba(127,127,127,0.35); stroke-width: 0.6; transition: fill 120ms linear; }
-        .cs-area.cs-lit { stroke: rgba(127,127,127,0.5); }
+        .cs-stage { position: relative; background: #0d1117; border-radius: 10px; padding: 14px 14px 10px;
+                    box-shadow: inset 0 0 120px rgba(0,0,0,0.65); overflow: hidden; }
+        .cs-stage::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+                           background: radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(0,0,0,0.55)); }
+        .cs-map { width: 100%; max-height: 460px; height: auto; display: block; background: transparent; }
+        .cs-area { stroke: rgba(255,255,255,0.16); stroke-width: 0.7; transition: fill 120ms linear; }
+        .cs-area.cs-lit { stroke: rgba(255,255,255,0.28); }
+        .cs-area.cs-shout-a { stroke: #f6ad55; stroke-width: 2; }
         .cs-area.cs-origin { stroke: #dd6b20; stroke-width: 3; animation: cs-pulse 1.1s ease-out 3; }
         .cs-area.cs-pop { stroke: #2b6cb0; stroke-width: 3; }
         .cs-area.cs-stuck { stroke: #dd6b20; stroke-width: 2.2; animation: cs-pulse 2.2s ease-in-out infinite; }
@@ -2664,29 +2776,39 @@ def _(anywidget, traitlets):
         .cs-sub { fill: #a0aec0; font: 9px system-ui; }
         @keyframes cs-wave { from { transform: scaleY(0.35); } to { transform: scaleY(1.5); } }
         .cs-card.cs-out { opacity: 0; transition: transform 520ms ease-in, opacity 520ms; }
-        .cs-thread { stroke: #dd6b20; stroke-width: 0.8; opacity: 0.55; transition: opacity 700ms; }
-        .cs-thread.cs-fade { opacity: 0; }
+        .cs-card.cs-shout rect { fill: #dd6b20; stroke: #ffd9b3; stroke-width: 1.6; }
+        .cs-card.cs-shout .cs-bar { fill: #fff; animation-duration: 0.22s; }
+        .cs-ring { fill: none; pointer-events: none; }
+        .cs-ring.cs-front { stroke: #f6ad55; stroke-width: 3; opacity: 0.85; }
+        .cs-ring.cs-echo { stroke: #f6ad55; stroke-width: 2; opacity: 0.7; }
+        .cs-ring.cs-burst { stroke: #fff; stroke-width: 2.5; opacity: 0.9; }
+        .cs-area.cs-hit { stroke: #f6ad55; stroke-width: 2.2; }
         .cs-stamp { fill: #2b6cb0; font: 600 9px system-ui; text-anchor: middle; }
 
-        .cs-hud { position: absolute; top: 6px; left: 8px; right: 8px; display: flex;
+        .cs-hud { position: absolute; top: 14px; left: 18px; right: 18px; z-index: 3; display: flex;
                   align-items: baseline; gap: 12px; pointer-events: none; }
-        .cs-phase { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: #888; }
+        .cs-phase { font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: #8b98a8; }
         .cs-clock { margin-left: auto; display: flex; align-items: baseline; gap: 8px; opacity: 0; transition: opacity 400ms; }
         .cs-dayw.cs-on { opacity: 1; }
         .cs-clock:has(.cs-on) { opacity: 1; }
-        .cs-day { font-size: 30px; color: #dd6b20; font-variant-numeric: tabular-nums; }
-        .cs-speed { font-size: 11px; color: #999; }
-        .cs-count { position: absolute; top: 34px; right: 0; font-size: 12px; color: #888; }
-        .cs-count b { color: #2b6cb0; font-size: 16px; font-variant-numeric: tabular-nums; }
+        .cs-day { font-size: 40px; color: #f6ad55; font-variant-numeric: tabular-nums;
+                  text-shadow: 0 0 22px rgba(246,173,85,0.45); }
+        .cs-dayw { color: #8b98a8; }
+        .cs-speed { font-size: 11px; color: #71809000; }
+        .cs-clock:hover .cs-speed, .cs-dayw.cs-on ~ .cs-speed { color: #718090; }
+        .cs-count { position: absolute; top: 44px; right: 0; font-size: 12px; color: #8b98a8; }
+        .cs-count b { color: #63b3ed; font-size: 18px; font-variant-numeric: tabular-nums; }
 
-        .cs-board { position: absolute; right: 8px; bottom: 34px; width: 172px; pointer-events: none;
-                    font-size: 11px; color: #888; }
+        .cs-board { position: absolute; right: 16px; bottom: 74px; width: 176px; pointer-events: none;
+                    font-size: 11px; color: #8b98a8; z-index: 2; }
         .cs-bh { text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; margin-bottom: 3px; }
         .cs-br { display: flex; justify-content: space-between; padding: 1px 0; }
-        .cs-br b { color: #dd6b20; font-variant-numeric: tabular-nums; }
+        .cs-br b { color: #f6ad55; font-variant-numeric: tabular-nums; }
 
-        .cs-cap { position: absolute; left: 8px; bottom: 8px; right: 190px; min-height: 34px;
-                  font-size: 15px; line-height: 1.35; color: #e8e8e8; text-shadow: 0 1px 6px rgba(0,0,0,0.6); }
+        .cs-cap { position: absolute; left: 0; right: 0; bottom: 0; min-height: 46px; z-index: 3;
+                  padding: 14px 18px 16px; font-size: 17px; line-height: 1.4; color: #f2f4f7;
+                  background: linear-gradient(transparent, rgba(0,0,0,0.85) 45%); }
+        .cs-cap b { color: #f6ad55; }
         .cs-ctrl { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
         .cs-play, .cs-skip { cursor: pointer; border: 1px solid rgba(127,127,127,0.4); border-radius: 4px;
                              background: transparent; color: inherit; font-size: 12px; padding: 5px 12px; }
@@ -2761,17 +2883,20 @@ def _(
         return [
             {"t": 0, "kind": "phase", "text": "Dialling 311"},
             {"t": 150, "kind": "ring"},
+            {"t": 700, "kind": "camera", "to": "origin", "pad": 4.2, "ms": 1500},
             {"t": 1100, "kind": "origin_card"},
             {"t": 1500, "kind": "audio", "clip": "premise"},
             {"t": 1500, "kind": "caption", "text": premise, "type": True},
-            {"t": 8600, "kind": "phase", "text": "Now the same call, from every neighborhood at once"},
+            {"t": 8600, "kind": "phase", "text": "Now the same call, from every neighborhood"},
             {"t": 8800, "kind": "caption", "text": "", "type": False},
+            {"t": 8700, "kind": "camera", "to": "full", "ms": 2500},
             {"t": 8900, "kind": "bloom"},
-            {"t": 12300, "kind": "caption", "text": issue, "type": False},
-            {"t": 14600, "kind": "phase", "text": "Reported"},
-            {"t": 14800, "kind": "collapse"},
-            {"t": 15900, "kind": "phase", "text": "Waiting"},
-            {"t": 15900, "kind": "countdown"},
+            {"t": 11400, "kind": "unison"},
+            {"t": 11400, "kind": "caption", "text": issue, "type": False},
+            {"t": 13600, "kind": "phase", "text": "Reported"},
+            {"t": 13800, "kind": "collapse"},
+            {"t": 14900, "kind": "phase", "text": "Waiting"},
+            {"t": 14900, "kind": "countdown"},
         ]
 
     def storm_clips(data_dir):
@@ -2782,7 +2907,7 @@ def _(
         audio that never plays.
         """
         _d = data_dir / "demo_call"
-        _want = lambda _f: _f.stem == "premise" or _f.stem.startswith("issue_")
+        _want = lambda _f: _f.stem == "premise" or _f.stem.startswith(("issue_", "sfx_"))
         return {
             _f.stem: "data:audio/mpeg;base64," + base64.b64encode(_f.read_bytes()).decode()
             for _f in (sorted(_d.glob("*.mp3")) if _d.exists() else [])
