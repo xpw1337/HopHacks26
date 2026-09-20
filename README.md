@@ -40,5 +40,7 @@ Delete `data/` to download a fresh snapshot from Open Baltimore (about 2 minutes
 **Service** is how well the city responds *as a share of that need*: the share of requests closed within 7 days,
 the share of vacant buildings rehabbed or torn down since 2023, and proactive city tickets per resident report.
 Measuring service as a share, not a count, stops the worst areas from looking well served just because they have
-the most problems. **Gap** = need percentile − service percentile, per topic, then a weighted average. 2,000 random
-weightings show which areas stay in the top 10 no matter what you care about.
+the most problems. **Neglect** is not the difference between the two: service is regressed on need within each
+topic, and the score is how far *below* that fitted line an area sits, so it cannot just restate the need map.
+Subtracting instead ranked areas at Spearman +0.88 with need alone. 2,000 random weightings show which areas stay
+in the top 10 no matter what you care about.

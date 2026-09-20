@@ -264,7 +264,7 @@ def _(FIX_HORIZON, fix_topics, mo, pl):
     _punchline = (
         f"**{_w['domain']}** is the case in point. The requests that did close took a median of "
         f"{_w['naive_median_days']:.0f} days, which sounds survivable. But "
-        f"{100 * _w['still_open_at_horizon']:.0f}% of them are still open {FIX_HORIZON} days on, so the "
+        f"{100 * _w['still_open_at_horizon']:.0f}% are predicted to still be open at {FIX_HORIZON} days, so the "
         f"half-way mark never arrives and the honest answer is that it has no median at all."
         if _w else
         "Every topic here reaches its half-way mark inside the window."
@@ -317,7 +317,7 @@ def _(DATA_DIR, call_pick, demo_calls, fix_summary, mo, pl):
                 f"Logged as **{_c['domain']}** in **{_c['csa']}**. Going on the "
                 f"{_r['n']:,} requests like it since January: **{100 * _r['fixed_by_7']:.0f}%** are fixed "
                 f"inside a week, **{100 * _r['fixed_by_30']:.0f}%** inside a month, and "
-                f"**{100 * _r['still_open_at_horizon']:.0f}%** are still open at the end &mdash; {_med}."
+                f"**{100 * _r['still_open_at_horizon']:.0f}%** are predicted to still be open at the end &mdash; {_med}."
             )
         else:
             _verdict = f"Logged as **{_c['domain']}** in **{_c['csa']}**, which has too few requests like it to score."
@@ -475,8 +475,12 @@ def _(bias_stats, mo):
     the advantage is {bias_stats["residual"]:+.2f} &mdash; nothing. On speed rather than eventual
     closure it points the other way ({bias_stats["fast"]:+.2f} against the share fixed inside a week).
 
-    Reporting rate is not civic engagement, it is a distress signal: it tracks vacancy at
-    {bias_stats["vacancy"]:+.2f}. That is why the clock above is fitted one topic at a time. Comparing
+    For the topics this notebook leads with &mdash; vacancy, streetlights, dumping &mdash; volume tracks
+    conditions rather than civic energy: reporting rate moves with vacancy at
+    {bias_stats["vacancy"]:+.2f}. We would not push that further. Published work using independent
+    ground truth (street surveys in Kansas City, pothole counts in Houston) finds the opposite for
+    *nuisance* categories, where poorer neighborhoods report **less** than their conditions warrant.
+    Both can hold at once, and it is why the clock above is fitted one topic at a time: comparing
     areas on a blend of topics compares their problems, not their service.
     """
         ),
@@ -536,6 +540,8 @@ def _(DOMAIN_ORDER, fix_days, mo, per, weight_sliders, window):
                         ("problem-statement", "Problem"),
                         ("data-overview", "Data"),
                         ("core-visualization", "Explore the map"),
+                        ("the-fix-clock", "The fix clock"),
+                        ("the-unison-call", "The unison call"),
                         ("insight-synthesis", "Insights"),
                         ("discussion-future-work", "Discussion"),
                         ("marimo-feedback", "marimo feedback"),
@@ -610,8 +616,9 @@ def _(mo, quadrant):
                 "### Need vs service, all 55 areas\n"
                 "Each dot is an area. **Bottom right** is the priority corner: high need, low service. "
                 "**Top left** gets more service than its need suggests. The pink ring is the area picked on the map.\n\n"
-                "Need and service are percentiles *within each topic*, averaged with your weights, so a +0.30 gap "
-                "means the area ranks 30 points higher on need than on service."
+                "Need and service are percentiles *within each topic*, averaged with your weights. The score is "
+                "not the distance between the two: it is how far **below the fitted service-on-need line** an area "
+                "sits, so a high score means it is served less than areas with the same amount of need."
             ),
         ],
         widths=[3, 2],
@@ -1547,8 +1554,12 @@ def _(
 
         The classifier answers one question per interval: given this request is still open, does it
         close now? Multiplying the answers back together gives the survival curve. Boosting is what
-        lets it use per-request facts a per-area average cannot -- the SLA clock the city set, which
-        agency owns it, how it came in -- and that is where nearly all of the accuracy comes from.
+        lets it use per-request facts a per-area average cannot. Permutation importance says almost all
+        of that comes from one of them: shuffling the SLA date the city itself set costs 0.11 Brier at
+        seven days, against 0.06 for the topic, 0.002 for the owning agency and nothing at all for the
+        reporting channel. Shuffling the neighbourhood and every area statistic costs nothing
+        measurable. The strongest thing we know about how long you will wait is the deadline the city
+        wrote on your ticket when you filed it.
 
         Calibrating on later requests than it trained on matters because sharpness and honesty are
         different things: the raw scores rank requests well but overstate their confidence.
@@ -2079,7 +2090,7 @@ def _(anywidget, traitlets):
             const pts = model.get("points");
             $(".tx-title").textContent = zoomed
               ? `${sel}${pts.area === sel && pts.note ? ": " + pts.note : ""}`
-              : focus ? `${focus} only: orange areas need more than they get` : "Neglect gap: orange = high need, low service";
+              : focus ? `${focus} only: orange areas get less than their need predicts` : "Neglect: orange = served less than this much need predicts";
             $(".tx-legend").innerHTML = zoomed
               ? (focus === "Vacant buildings" ? "" :
                   `<span><i style="background:${DOT.open}"></i>still open (bigger = older)</span>` +
