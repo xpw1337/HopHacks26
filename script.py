@@ -667,6 +667,7 @@ def _(DOMAIN_ORDER, fix_days, mo, per, weight_sliders, window):
                         ("problem-statement", "Problem"),
                         ("data-overview", "Data"),
                         ("core-visualization", "Explore the map"),
+                        ("organization-response", "Organizations"),
                         ("the-fix-clock", "The fix clock"),
                         ("the-unison-call", "The unison call"),
                         ("insight-synthesis", "Insights"),
@@ -729,6 +730,93 @@ def _(area_reqs, area_vac, focus_topic, mo, pl, selected_area, snapshot_meta, VA
                 mimetype="text/csv",
                 label="Download this work list (CSV)",
             ),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(MIN_REQUESTS, fix_days, mo, organization_cells, organization_responsibility, pl, selected_area):
+    _selected = organization_cells.filter(pl.col("csa") == selected_area)
+    if _selected.height:
+        _organizations = (
+            _selected.group_by("agency")
+            .agg(
+                pl.col("local_fast").sum(),
+                pl.col("local_requests").sum(),
+                (
+                    (pl.col("component_score") * pl.col("local_requests")).sum()
+                    / pl.col("local_requests").sum()
+                ).alias("score"),
+                (
+                    (pl.col("city_fast_rate") * pl.col("local_requests")).sum()
+                    / pl.col("local_requests").sum()
+                ).alias("city_fast_rate"),
+                pl.col("domain").sort().str.join(", ").alias("components"),
+            )
+            .with_columns(
+                (pl.col("local_fast") / pl.col("local_requests")).alias("local_fast_rate"),
+            )
+            .with_columns(
+                (pl.col("local_fast_rate") - pl.col("city_fast_rate")).alias("vs_city"),
+            )
+            .sort(["score", "local_requests", "agency"], descending=[True, True, False])
+        )
+        _score_table = _organizations.select(
+            pl.col("agency").alias("Organization"),
+            pl.col("score").round(0).cast(pl.Int64).alias("Score (0–100)"),
+            pl.col("local_fast_rate")
+            .map_elements(lambda v: f"{v:.0%}", return_dtype=pl.String)
+            .alias(f"Closed ≤{fix_days.value}d here"),
+            pl.col("city_fast_rate")
+            .map_elements(lambda v: f"{v:.0%}", return_dtype=pl.String)
+            .alias("Citywide baseline"),
+            pl.col("vs_city")
+            .map_elements(lambda v: f"{v:+.0%}", return_dtype=pl.String)
+            .alias("Here vs city"),
+            pl.col("local_requests").alias("Eligible requests"),
+            pl.col("components").alias("Components handled here"),
+        )
+        _responsibility_table = (
+            organization_responsibility.select(
+                pl.col("domain").alias("Component"),
+                pl.col("agency").alias("Organization"),
+                pl.col("request_share")
+                .map_elements(lambda v: f"{v:.0%}", return_dtype=pl.String)
+                .alias("Share of citywide requests"),
+                pl.col("requests").alias("Citywide requests"),
+            )
+        )
+        _body = [
+            mo.ui.table(_score_table, selection=None, page_size=10, show_column_summaries=False),
+            mo.md(
+                "**Who handles which component?** The source data records the organization assigned "
+                "to each 311 request. Shares below are citywide; multiple organizations can handle "
+                "the same component."
+            ),
+            mo.ui.table(_responsibility_table, selection=None, page_size=10, show_column_summaries=False),
+        ]
+    else:
+        _body = [
+            mo.callout(
+                mo.md(
+                    f"No organization has at least {MIN_REQUESTS} eligible requests in this area and time window. "
+                    "Choose a longer window or another area."
+                ),
+                kind="warn",
+            )
+        ]
+    mo.vstack(
+        [
+            mo.md(
+                f'<span id="organization-response"></span>\n'
+                f"### Organization response: {selected_area}\n"
+                f"The score compares how often each organization closed requests within "
+                f"**{fix_days.value} days here** with its own citywide pace for the same components. "
+                "A score near 50 is typical after that comparison; higher means faster locally. "
+                f"Only organization-component groups with at least {MIN_REQUESTS} eligible requests are scored."
+            ),
+            *_body,
         ]
     )
     return
@@ -1572,6 +1660,74 @@ def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta
 
 
 @app.cell
+def _(BULK_CLOSED, MIN_REQUESTS, datetime, pl, timedelta):
+    def score_organizations(requests_311, *, snapshot_ts, window_days, fix_days):
+        """Compare each agency's local fix speed with its citywide pace for the same topic.
+
+        A component score is the percentile rank of a CSA's local-minus-citywide fast-close
+        difference among eligible CSAs in that topic. This controls for organizations and topics
+        that normally work at different speeds. Cells below MIN_REQUESTS are not publicly scored.
+        """
+        _end = datetime.fromisoformat(snapshot_ts)
+        _start = _end - timedelta(days=window_days) if window_days else datetime(1900, 1, 1)
+        _eligible_by_age = _end - timedelta(days=fix_days)
+        _assigned = requests_311.filter(
+            ~pl.col("proactive")
+            & ~pl.col("sr_type").is_in(BULK_CLOSED)
+            & pl.col("agency").is_not_null()
+            & (pl.col("agency").str.strip_chars() != "")
+            & (pl.col("created") >= _start)
+        )
+        _requests = (
+            _assigned.filter(pl.col("created") <= _eligible_by_age)
+            .with_columns(
+                ((pl.col("closed") - pl.col("created")) <= pl.duration(days=fix_days))
+                .fill_null(False)
+                .alias("_fast")
+            )
+        )
+        _city = _requests.group_by("agency", "domain").agg(
+            pl.len().alias("city_requests"),
+            pl.col("_fast").mean().alias("city_fast_rate"),
+        )
+        _local = (
+            _requests.group_by("csa", "agency", "domain")
+            .agg(
+                pl.len().alias("local_requests"),
+                pl.col("_fast").sum().alias("local_fast"),
+                pl.col("_fast").mean().alias("local_fast_rate"),
+            )
+            .filter(pl.col("local_requests") >= MIN_REQUESTS)
+            .join(_city, on=["agency", "domain"], how="left", validate="m:1")
+            .with_columns((pl.col("local_fast_rate") - pl.col("city_fast_rate")).alias("vs_city"))
+        )
+        _rank_n = pl.len().over("domain")
+        _cells = (
+            _local.with_columns(
+                pl.when(_rank_n > 1)
+                .then(
+                    (pl.col("vs_city").rank("average").over("domain") - 1)
+                    / (_rank_n - 1)
+                    * 100
+                )
+                .otherwise(50.0)
+                .alias("component_score")
+            )
+            .sort("csa", "agency", "domain")
+        )
+        _responsibility = (
+            _assigned.group_by("domain", "agency")
+            .agg(pl.len().alias("requests"))
+            .with_columns(pl.col("requests").sum().over("domain").alias("domain_requests"))
+            .with_columns((pl.col("requests") / pl.col("domain_requests")).alias("request_share"))
+            .sort(["domain", "requests", "agency"], descending=[False, True, False])
+        )
+        return _cells, _responsibility
+
+    return (score_organizations,)
+
+
+@app.cell
 def _(BULK_CLOSED, FIX_HALF_LIFE, FIX_HORIZON, FIX_KAPPA, datetime, np, pl):
     def fit_fix_clock(requests_311, *, snapshot_ts, horizon=FIX_HORIZON, kappa=FIX_KAPPA,
                       half_life=FIX_HALF_LIFE):
@@ -1952,6 +2108,7 @@ def _(
     rank_stability,
     requests_311,
     score_areas,
+    score_organizations,
     snapshot_meta,
     summarize,
 ):
@@ -1962,7 +2119,19 @@ def _(
     )
     default_overall = summarize(default_scores, {d: 1 for d in DOMAIN_ORDER})
     default_robust = rank_stability(default_scores)
-    return default_overall, default_robust, default_scores
+    default_organization_cells, default_organization_responsibility = score_organizations(
+        requests_311,
+        snapshot_ts=snapshot_meta["snapshot_ts"],
+        window_days=0,
+        fix_days=DEFAULT_FIX_DAYS,
+    )
+    return (
+        default_organization_cells,
+        default_organization_responsibility,
+        default_overall,
+        default_robust,
+        default_scores,
+    )
 
 
 @app.cell
@@ -3763,6 +3932,17 @@ def _(default_overall, explorer, mo):
 
 
 @app.cell
+def _(fix_days, requests_311, score_organizations, snapshot_meta, window):
+    organization_cells, organization_responsibility = score_organizations(
+        requests_311,
+        snapshot_ts=snapshot_meta["snapshot_ts"],
+        window_days=window.value,
+        fix_days=fix_days.value,
+    )
+    return organization_cells, organization_responsibility
+
+
+@app.cell
 def _(
     VACANCY,
     area_requests,
@@ -4065,7 +4245,21 @@ def _(VACANCY, alt, default_scores, mo, neglect_residual, pl, spearman):
 
 
 @app.cell
-def _(DOMAIN_ORDER, VACANCY, areas, default_scores, mo, pl, snapshot_meta, spearman):
+def _(
+    BULK_CLOSED,
+    DOMAIN_ORDER,
+    MIN_REQUESTS,
+    VACANCY,
+    areas,
+    default_organization_cells,
+    default_organization_responsibility,
+    default_scores,
+    mo,
+    pl,
+    requests_311,
+    snapshot_meta,
+    spearman,
+):
     _d = snapshot_meta["dropped"]
     _vac = default_scores.filter(pl.col("domain") == VACANCY).join(areas, on="csa")
     _bnia_r = spearman(_vac["need_rate"], _vac["bnia_vacant_pct"])
@@ -4073,12 +4267,45 @@ def _(DOMAIN_ORDER, VACANCY, areas, default_scores, mo, pl, snapshot_meta, spear
         pl.col("need_pct").min().alias("lo"), pl.col("need_pct").max().alias("hi")
     )
     _svc = default_scores.filter(pl.col("service_rate").is_not_null())
+    _org_scores_ok = (
+        default_organization_cells.height > 0
+        and default_organization_cells.filter(pl.col("component_score").is_between(0, 100)).height
+        == default_organization_cells.height
+    )
+    _org_counts_ok = default_organization_cells.filter(
+        (pl.col("local_requests") < MIN_REQUESTS)
+        | (pl.col("city_requests") < pl.col("local_requests"))
+        | (pl.col("local_fast") > pl.col("local_requests"))
+    ).is_empty()
+    _share_totals = default_organization_responsibility.group_by("domain").agg(
+        pl.col("request_share").sum().alias("share")
+    )
+    _responsibility_ok = (
+        _share_totals.height > 0
+        and _share_totals.filter((pl.col("share") - 1).abs() > 1e-9).is_empty()
+    )
+    _expected_org_requests = requests_311.filter(
+        ~pl.col("proactive")
+        & ~pl.col("sr_type").is_in(BULK_CLOSED)
+        & pl.col("agency").is_not_null()
+        & (pl.col("agency").str.strip_chars() != "")
+    ).height
+    _org_exclusions_ok = default_organization_responsibility["requests"].sum() == _expected_org_requests
+    _org_sort_ok = (
+        default_organization_cells.to_dicts()
+        == default_organization_cells.sort("csa", "agency", "domain").to_dicts()
+    )
     _checks = [
         ("All 55 areas loaded, each with population and parcels", areas.height == 55 and areas.filter((pl.col("pop") > 0) & (pl.col("parcels") > 0)).height == 55),
         ("Every area appears in every topic (none lost in the joins)", default_scores.height == 55 * len(DOMAIN_ORDER)),
         ("Need percentiles span 0 to 1 in every topic", _pct.filter((pl.col("lo") == 0) & (pl.col("hi") == 1)).height == len(DOMAIN_ORDER)),
         ("Every service share is between 0 and 1", _svc.filter(pl.col("service_rate").is_between(0, 1)).height == _svc.height),
         ("No service score without need behind it", _svc.filter(pl.col("n_service") < 1).height == 0),
+        ("Organization scores stay between 0 and 100", _org_scores_ok),
+        ("Organization baselines cover every eligible local request", _org_counts_ok),
+        ("Organization responsibility shares sum to 100% within each component", _responsibility_ok),
+        ("Organization metrics apply their age, proactive, bulk-close, and assignment exclusions", _org_exclusions_ok),
+        ("Organization score rows have deterministic ordering", _org_sort_ok),
         (f"Our vacancy rate agrees with BNIA's (rank correlation {_bnia_r:.2f} ≥ 0.8)", _bnia_r >= 0.8),
     ]
     _ok = all(p for _, p in _checks)

@@ -44,3 +44,17 @@ the most problems. **Neglect** is not the difference between the two: service is
 topic, and the score is how far *below* that fitted line an area sits, so it cannot just restate the need map.
 Subtracting instead ranked areas at Spearman +0.88 with need alone. 2,000 random weightings show which areas stay
 in the top 10 no matter what you care about.
+
+## Organization response scores
+
+Selecting a CSA on the map also updates an organization response section. For each organization and issue
+component, it compares the local share of resident requests closed within the current **Fix days** setting with
+that organization's citywide rate for the same component. The local-minus-citywide result is percentile-ranked
+against comparable CSA/component cells; those component scores are then weighted by eligible request count into a
+0–100 organization score. A score near 50 is typical after controlling for the organization and component, while
+a higher score means the organization is resolving that area's requests faster than its usual citywide pace.
+
+Only requests old enough to have received the full fix window count, and organization/component cells with fewer
+than 10 eligible requests are not scored. Proactive tickets and known bulk administrative closes are excluded.
+The responsibility table is derived from the `Agency` assigned on Baltimore's 311 records. It describes observed
+routing—not legal responsibility—and a component can be split among multiple organizations.
