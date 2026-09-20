@@ -426,6 +426,77 @@ def _(storm_view):
 
 
 @app.cell
+def _(STORM_ORIGIN, STORM_TOPIC, fix_summary, mo, pl):
+    _scored = fix_summary.filter(pl.col("n") >= 30)
+    ask_topic = mo.ui.dropdown(
+        options=sorted(_scored["domain"].unique().to_list()), value=STORM_TOPIC, label="**I want to report**"
+    )
+    ask_area = mo.ui.dropdown(
+        options=sorted(_scored.filter(pl.col("domain") == STORM_TOPIC)["csa"].unique().to_list()),
+        value=STORM_ORIGIN,
+        label="**on my block in**",
+    )
+    return ask_area, ask_topic
+
+
+@app.cell
+def _(FIX_HORIZON, ask_area, ask_topic, fix_inputs, fix_summary, mo, pl):
+    def ask_answer(topic, area, summary, inputs):
+        """The same question the sequence dramatises, asked one request at a time."""
+        _row = summary.filter((pl.col("domain") == topic) & (pl.col("csa") == area))
+        if not _row.height or _row.row(0, named=True)["n"] < 30:
+            return mo.md(
+                f"Too few **{topic.lower()}** reports in **{area}** to say anything honest. "
+                "Pick another pairing."
+            )
+        _r = _row.row(0, named=True)
+        _peers = summary.filter((pl.col("domain") == topic) & (pl.col("n") >= 30)).sort("still_open_at_horizon")
+        _best, _worst = _peers.row(0, named=True), _peers.row(_peers.height - 1, named=True)
+        _rank = _peers.with_row_index("i").filter(pl.col("csa") == area).row(0, named=True)["i"] + 1
+        _sla = inputs.filter((pl.col("domain") == topic) & (pl.col("csa") == area))
+        _promise = _sla.row(0, named=True)["sla_days"] if _sla.height else None
+
+        return mo.vstack(
+            [
+                mo.md(
+                    f"""
+    ## {100 * _r["still_open_at_horizon"]:.0f}% chance it is never dealt with
+
+    Report **{topic.lower()}** on a block in **{area}** today and, going on the {_r["n"]:,} reports
+    like it since January, **{100 * _r["fixed_by_7"]:.0f}%** are closed inside a week,
+    **{100 * _r["fixed_by_30"]:.0f}%** inside a month, and
+    **{100 * _r["still_open_at_horizon"]:.0f}%** are still open {FIX_HORIZON} days later.
+    {"The city gives itself **" + f"{_promise:.0f}" + " days** for this." if _promise else ""}
+    """
+                ),
+                mo.md(
+                    f"""
+    That puts it **{_rank} of {_peers.height}** neighborhoods for this problem. The same report gets
+    left open **{100 * _best["still_open_at_horizon"]:.0f}%** of the time in
+    **{_best["csa"]}** and **{100 * _worst["still_open_at_horizon"]:.0f}%** of the time in
+    **{_worst["csa"]}**. Nothing about the request changes &mdash; only the address.
+    """
+                ),
+            ]
+        )
+
+    mo.vstack(
+        [
+            mo.md(
+                """
+    ### Try it on your own block
+
+    The sequence above runs one request everywhere at once. This runs it wherever you like.
+    """
+            ),
+            mo.hstack([ask_topic, ask_area], justify="start", gap=2),
+            ask_answer(ask_topic.value, ask_area.value, fix_summary, fix_inputs),
+        ]
+    )
+    return
+
+
+@app.cell
 def _(fix_calibration, fix_model, mo, pl):
     _c = {_r["horizon"]: _r for _r in fix_calibration.iter_rows(named=True)}
     _best = min(_c.values(), key=lambda _r: _r["gap"])
