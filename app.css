@@ -506,11 +506,59 @@ marimo-download .markdown.prose > * {
 .markdown.prose > ul,
 .markdown.prose > ol,
 .markdown.prose > blockquote,
-.markdown.prose > pre {
+.markdown.prose > pre,
+.markdown.prose > table {
   display: block;
   max-width: min(var(--measure), 100%);
   margin-left: auto;
   margin-right: auto;
+}
+
+/* Markdown tables were rendering wider than the column they sit in, so they drifted out of
+ * alignment with the text and the striping ran past the rule. Same treatment as the data tables:
+ * hairlines, a quiet header, figures that line up, and no zebra. */
+.markdown.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--sans);
+  font-size: 0.86rem;
+  margin: 1.4rem auto;
+}
+.markdown.prose thead th {
+  font-weight: 500;
+  font-size: 0.72rem;
+  color: var(--slate-400);
+  border-bottom: 1px solid var(--ink);
+  padding: 0 10px 7px 0;
+  text-align: left;
+}
+.markdown.prose tbody td {
+  border-bottom: 1px solid var(--rule);
+  padding: 7px 10px 7px 0;
+  background: none;
+  font-variant-numeric: tabular-nums;
+  color: #253340;
+}
+.markdown.prose tbody tr {
+  background: none;
+}
+/* The markdown declares no column alignment, so the right-alignment and the zebra rows are coming
+ * from marimo's prose defaults. Words read from the left; only the counts are a number column. */
+.markdown.prose table th,
+.markdown.prose table td {
+  text-align: left !important;
+}
+.markdown.prose table th:nth-child(2),
+.markdown.prose table td:nth-child(2) {
+  text-align: right !important;
+  white-space: nowrap;
+  padding-right: 26px;
+}
+.markdown.prose table tbody tr,
+.markdown.prose table tbody tr:nth-child(2n),
+.markdown.prose table tbody tr:nth-child(2n + 1),
+.markdown.prose table tbody td {
+  background: transparent !important;
 }
 .markdown.prose > .paragraph,
 .markdown.prose > ul,
