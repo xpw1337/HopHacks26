@@ -214,10 +214,6 @@ def _(mo, snapshot_meta):
     **Topics we score** (need and service for each): streetlights, potholes, roads, illegal dumping,
     dirty streets and alleys, rats, graffiti, trees, flooding, and vacant buildings.
 
-    **Be careful with 311.** A 311 count measures *complaining*, not just conditions. Vacancy notices and
-    crime reports are written by city staff, so they do not have this problem. We use them to catch areas
-    that are bad but quiet (see "These may be worse than they look").
-
     We removed **{snapshot_meta["dropped"]["duplicate_or_transferred"]:,}** 311 requests marked duplicate or
     transferred, so the same pothole is not counted twice.
     """)
@@ -225,10 +221,9 @@ def _(mo, snapshot_meta):
 
 
 @app.cell
-def _(mo, quality_panel, method_check, clock_vs_cutoff):
+def _(mo, method_check, clock_vs_cutoff):
     mo.accordion(
         {
-            "Data quality checks (click to open)": quality_panel,
             "Why service is a share of need, not a count (click to open)": method_check,
             "Clock vs old 7-day cutoff (click to open)": clock_vs_cutoff,
         }
@@ -738,7 +733,9 @@ def _(DOMAIN_ORDER, fix_days, mo, per, weight_sliders, window):
 
 
 @app.cell
-def _(area_reqs, area_vac, focus_topic, mo, pl, selected_area, snapshot_meta, VACANCY):
+def _(area_reqs, area_vac, focus_topic, mo, picked_area, pl, selected_area, snapshot_meta, VACANCY):
+    # No area picked (the city view), so there is no crew list to hand anyone. Show nothing.
+    mo.stop(not picked_area)
     if focus_topic == VACANCY:
         _list = (
             area_vac.filter(~pl.col("handled"))
@@ -2826,7 +2823,13 @@ def _(anywidget, traitlets):
           const drawCard = () => {
             const data = model.get("data"), sel = model.get("selected"), focus = model.get("focus");
             const card = (data.cards || {})[sel];
-            if (!card) { $(".tx-card").innerHTML = ""; return; }
+            if (!card) {
+              // Nothing picked (the city view). Say so, rather than leaving an empty column.
+              $(".tx-card").innerHTML = sel ? "" :
+                `<div class="gc-empty">Click an area on the map, or search for one, to see which
+                 topics it is under-served on.</div>`;
+              return;
+            }
             const CW = 230, PAD = 10, x = (p) => PAD + p * (CW - 2 * PAD);
             let html = `<div class="gc-head"><b>${esc(sel)}</b><span>${esc(card.subtitle)}</span></div>
               <div class="gc-row gc-scale"><span></span><svg width="${CW}" height="14"><text x="${PAD}" y="11">0%</text>
@@ -2852,7 +2855,13 @@ def _(anywidget, traitlets):
 
           // --- Events
           gAreas.addEventListener("click", (e) => e.target.dataset.csa && select(e.target.dataset.csa, true));
-          $(".tx-back").addEventListener("click", () => zoomTo(null));
+          // Back to the city view also clears the pick: the map shows no outline, so leaving
+          // `selected` set would keep the Gap Card and the work list on an area nothing points at.
+          $(".tx-back").addEventListener("click", () => {
+            model.set("selected", "");
+            model.save_changes();
+            zoomTo(null);
+          });
           $(".tx-search").addEventListener("change", (e) => {
             if (paths[e.target.value]) { select(e.target.value, true); e.target.value = ""; e.target.blur(); }
           });
@@ -2930,6 +2939,7 @@ def _(anywidget, traitlets):
         .gc-track { stroke: rgba(127,127,127,0.3); stroke-width: 1; }
         .gc-gap { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
         .gc-foot { margin-top: 8px; color: #777; font-size: 11px; }
+        .gc-empty { color: #777; font-size: 12px; padding: 14px 10px; max-width: 230px; }
         .gc-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; vertical-align: middle; }
         .gc-hollow { border: 2px solid #555; width: 5px; height: 5px; }
         """
@@ -4385,10 +4395,15 @@ def _(VACANCY, domain_scores, fix_days, overall, pl, triage_widget):
 
 @app.cell
 def _(default_overall, explorer, mo):
-    selected_area = explorer.value.get("selected") or default_overall["csa"][0]
+    # `picked_area` is empty after "Back to city": the map shows the whole city with nothing
+    # outlined. `selected_area` keeps a fallback so the panels that always need an area still have
+    # one; anything that should disappear when nothing is picked checks `picked_area` instead.
+    picked_area = explorer.value.get("selected") or ""
+    selected_area = picked_area or default_overall["csa"][0]
     focus_topic = explorer.value.get("focus") or ""
-    mo.query_params().set("area", selected_area)
-    return focus_topic, selected_area
+    if picked_area:
+        mo.query_params().set("area", picked_area)
+    return focus_topic, picked_area, selected_area
 
 
 @app.cell
@@ -4692,51 +4707,6 @@ def _(VACANCY, alt, default_scores, mo, neglect_residual, pl, spearman):
         ]
     )
     return method_check, method_check_stats
-
-
-@app.cell
-def _(DOMAIN_ORDER, VACANCY, areas, default_scores, mo, pl, snapshot_meta, spearman):
-    _d = snapshot_meta["dropped"]
-    _vac = default_scores.filter(pl.col("domain") == VACANCY).join(areas, on="csa")
-    _bnia_r = spearman(_vac["need_rate"], _vac["bnia_vacant_pct"])
-    _pct = default_scores.group_by("domain").agg(
-        pl.col("need_pct").min().alias("lo"), pl.col("need_pct").max().alias("hi")
-    )
-    _svc = default_scores.filter(pl.col("service_rate").is_not_null())
-    _checks = [
-        ("All 55 areas loaded, each with population and parcels", areas.height == 55 and areas.filter((pl.col("pop") > 0) & (pl.col("parcels") > 0)).height == 55),
-        ("Every area appears in every topic (none lost in the joins)", default_scores.height == 55 * len(DOMAIN_ORDER)),
-        ("Need percentiles span 0 to 1 in every topic", _pct.filter((pl.col("lo") == 0) & (pl.col("hi") == 1)).height == len(DOMAIN_ORDER)),
-        ("Every service share is between 0 and 1", _svc.filter(pl.col("service_rate").is_between(0, 1)).height == _svc.height),
-        ("No service score without need behind it", _svc.filter(pl.col("n_service") < 1).height == 0),
-        (f"Our vacancy rate agrees with BNIA's (rank correlation {_bnia_r:.2f} ≥ 0.8)", _bnia_r >= 0.8),
-    ]
-    _ok = all(p for _, p in _checks)
-    _lines = "\n".join(f"| {'✅' if p else '❌'} | {name} |" for name, p in _checks)
-    quality_panel = mo.vstack(
-        [
-            mo.callout(
-                mo.md("**All checks pass.**" if _ok else "**Some checks failed. Read the numbers with care.**"),
-                kind="success" if _ok else "danger",
-            ),
-            mo.md(f"""
-            | | Check |
-            | --- | --- |
-            {_lines}
-
-            **Rows kept and dropped**
-
-            | Step | Rows |
-            | --- | --- |
-            | 311 requests fetched in our topics | {_d["requests_fetched"]:,} |
-            | Dropped: marked duplicate or transferred | {_d["duplicate_or_transferred"]:,} |
-            | Dropped: no location, or outside the 55 areas | {_d["requests_outside_areas"]:,} |
-            | Housing records dropped: outside the 55 areas | {_d["housing_outside_areas"]:,} |
-            | **311 requests used** | **{snapshot_meta["counts"]["requests_311"]:,}** |
-            """),
-        ]
-    )
-    return (quality_panel,)
 
 
 @app.cell
