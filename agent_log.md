@@ -38,3 +38,30 @@ Format: **date · tool · task** → what happened → how we checked → lesson
 
 **2026-09-19 · Claude Code · rubric check**
 - Compared the plan to the judging rubric and added a checklist. Gaps found: no related-work box, headings not matching the rubric's words, the separate loader module hurt "self-contained", and there was no offline test.
+
+**2026-09-19 · Claude Code · "does neglect cause crime?" → the alley/rats section**
+- Asked whether slow repairs drive crime. The agent found the data (BPD NIBRS, 2022–2026, with a
+  timestamp and an indoor/outdoor flag) and produced a strong answer: slow street cleaning tracks
+  night crime at **+0.58** across the 55 areas.
+- It then attacked its own result. Slow *potholes* track night crime at **−0.46**: the sign of the
+  finding is chosen by whichever topic you pick, so the correlation is measuring neighbourhood type.
+  A streetlight-level test (6,209 outages, crime before vs after, dark vs fixed-fast) came out at
+  zero, and at the loose settings where it looked significant the **daytime placebo moved more**.
+- Potholes vs crashes: checked five sources and found none usable. The only Baltimore crash layer
+  ends in 2019 and has **0 rows inside the city** (state highways only).
+- Swept all 81 topic pairs. The single strongest result, **dirty alley → pothole at 7.8σ**, is
+  impossible. That is the finding: a request left open is not a random draw, so anything regressed
+  on open-vs-closed moves.
+- Dirty alley → rats survived further, but only after a mistake was caught. Ranking pairs by sigma
+  is wrong (a wider circle holds more reports, so sigma climbs with radius for any constant effect).
+  Switching to reports **per hectare per ring** reversed the ranking: the 7.8σ pair is flat, rats
+  decays.
+- Building the chart caught the last problem. The event study showed the two arms were never
+  comparable: rat reports near alleys the city leaves open were already **2.3× rarer**, and already
+  climbing before the alley was reported. Restricting to alleys that started clean drops the effect
+  from +0.16 to **+0.07 (+28%, 2.3σ)** — and makes the decay test cleaner, 4.4× against 2.0×.
+- Checked: `uv run scripts/neglect_probe.py` reproduces every number; the notebook's own figures were
+  cross-checked against it; our 2026 crime rate agrees with BNIA's 2023 rate at +0.87.
+- Lesson: the agent's first answer, its second, and its third were each wrong in a different way, and
+  every correction came from a test we asked it to run against itself. Drawing the chart is a test —
+  the baseline imbalance was invisible in the summary statistic and obvious the moment it was plotted.

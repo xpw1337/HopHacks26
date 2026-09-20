@@ -97,36 +97,20 @@ def _(live_banner):
 
 
 @app.cell
-def _(ROBUST_SHARE, default_robust, method_check_stats, mo, snapshot_meta):
-    _robust = default_robust.filter(default_robust["verdict"] == "Robust")["csa"].to_list()
-    _names = ", ".join(f"**{n}**" for n in _robust[:3])
-    _lead = (
-        f"Under at least {ROBUST_SHARE:.0%} of 2,000 random ways to weigh the topics, {_names} "
-        f"{'stays' if len(_robust) == 1 else 'stay'} in the top 10."
-        if _robust
-        else "No single area stays in the top 10 under nearly every weighting, so the ranking depends on your weights."
-    )
-    _moved_up = method_check_stats["top5_rank_new"] < method_check_stats["top5_rank_old"]
-    _surprise = (
-        "areas move up the ranking, where they belong."
-        if _moved_up
-        else "areas get a fairer score."
-    )
+def _(mo, snapshot_meta):
     mo.md(f"""
     ## Executive summary
 
-    Baltimore decides what to fix next mostly by waiting for complaints. Each agency works its own queue,
-    so nobody sees the area that is failing on many fronts at once, or the area that has stopped calling 311.
+    Each public welfare agency in Baltimore works its own queue, so the bigger picture is missed:
+    nobody sees the area that is failing on many fronts at once, or the area that has stopped
+    calling 311.
 
-    We score all 55 Community Statistical Areas on two things: **need** (how bad conditions are) and
+    We score all 55 Community Statistical Areas on **need** (how bad conditions are) and
     **service** (how long those problems stay open — the same clock as a single resident call).
-    The **gap** between them is the priority. High need with low service is where the city is missing.
+    The priority is the **neglect gap**: how far an area falls below the service its level of
+    need predicts.
 
-    {_lead} That result does not depend on anyone's opinion about which problem matters most.
-
-    The surprise: counting demolitions and rehabs *per parcel* (the usual way) makes the worst vacancy
-    areas look well served, just because they have the most vacant houses. We measure service as a
-    share of the need instead, and those {_surprise} *(Data snapshot: {snapshot_meta["snapshot_date"]}.)*
+    *(Data snapshot: {snapshot_meta["snapshot_date"]}.)*
     """)
     return
 
@@ -136,8 +120,12 @@ def _(mo):
     mo.md(r"""
     ## Problem statement
 
-    Baltimore has a limited repair budget and a very long list of broken things. Today the order of work
-    comes from three places, and all three have a blind spot:
+    Baltimore has a **neglect gap**: areas that get less service than other areas carrying the same
+    amount of need. Need on its own is not the story &mdash; every dashboard in the city already
+    shows that East and West Baltimore are struggling. The gap shows where that struggle is going
+    unanswered.
+
+    Nothing in the city's systems measures it, for three reasons:
 
     1. **Complaints.** 311 is reactive. Areas that call get served, so service follows who calls, not just what is broken.
     2. **Silos.** Housing, Transportation, BGE and Sanitation each rank only their own work. No one adds them up.
@@ -150,8 +138,10 @@ def _(mo):
     **Silence looks like satisfaction.** An area with few 311 calls looks healthy on every dashboard. It may
     instead be an area that stopped believing the city will come.
 
-    **The question this notebook answers:** *given what the city already knows, where does the next dollar
-    do the most good, and which areas are being missed?*
+    **What this notebook gives an official:** the gap, measured for all 55 areas, sorted into the three
+    answers that decide a budget &mdash; the areas to **concentrate on**, served least for the need they
+    carry; the areas **already being worked**, where the response matches the problem; and the areas
+    getting **more attention than their conditions call for**.
     """)
     return
 
@@ -288,7 +278,7 @@ def _(FIX_HORIZON, fix_topics, mo, pl):
     _punchline = (
         f"**{_w['domain']}** is the case in point. The requests that did close took a median of "
         f"{_w['naive_median_days']:.0f} days, which sounds survivable. But "
-        f"{100 * _w['still_open_at_horizon']:.0f}% of them are still open {FIX_HORIZON} days on, so the "
+        f"{100 * _w['still_open_at_horizon']:.0f}% are predicted to still be open at {FIX_HORIZON} days, so the "
         f"half-way mark never arrives and the honest answer is that it has no median at all."
         if _w else
         "Every topic here reaches its half-way mark inside the window."
@@ -342,7 +332,7 @@ def _(DATA_DIR, call_pick, demo_calls, domain_scores, fix_days, fix_summary, mo,
                 f"Logged as **{_c['domain']}** in **{_c['csa']}**. Going on the "
                 f"{_r['n']:,} requests like it since January: **{100 * _r['fixed_by_7']:.0f}%** are fixed "
                 f"inside a week, **{100 * _r['fixed_by_30']:.0f}%** inside a month, and "
-                f"**{100 * _r['still_open_at_horizon']:.0f}%** are still open at the end &mdash; {_med}."
+                f"**{100 * _r['still_open_at_horizon']:.0f}%** are predicted to still be open at the end &mdash; {_med}."
             )
         else:
             _verdict = f"Logged as **{_c['domain']}** in **{_c['csa']}**, which has too few requests like it to score."
@@ -380,22 +370,89 @@ def _(clock_topic, fix_clock_view, mo):
 
 
 @app.cell
-def _(STORM_ORIGIN, STORM_TOPIC, mo):
+def _(
+    ALLEY_MIN_ARM,
+    RATS,
+    alley,
+    alley_compare,
+    alley_growth_chart,
+    alley_ring_chart,
+    mo,
+):
+    _s = alley["stats"]
+    _pivot = alley["rings"].pivot(on="ring", index="outcome", values="density")
+    _ring_cols = [_c for _c in _pivot.columns if _c != "outcome"]
+    _ring_rows = "\n".join(
+        f"| {'**' + _r['outcome'] + '**' if _r['outcome'] == RATS else _r['outcome']} | "
+        + " | ".join(f"{_r[_c]:+.4f}" for _c in _ring_cols)
+        + f" | {alley['decay'][_r['outcome']]:.1f}× |"
+        for _r in _pivot.iter_rows(named=True)
+    )
+    _method = mo.md(
+        f"""
+    Two things had to be dealt with before this number meant anything.
+
+    **The alleys are not alike.** Rat reports near the alleys the city leaves open were already
+    **{_s["baseline_fast"] / _s["baseline_left"]:.1f}x rarer** than near the ones it clears
+    quickly, and already climbing before the alley was reported at all. A plain before-and-after
+    difference reads that head start as an effect and returns +0.16. So the comparison keeps only
+    the **{_s["clean_share"]:.0%}** of alleys with no rat report nearby in the previous
+    {_s["window"]} days. Both arms then start at zero, and the answer drops to +{_s["diff"]:.2f}.
+
+    **Reports of everything cluster.** A pair can look local for reasons that have nothing to do
+    with rubbish, so we ran the identical test on outcomes an alley *cannot* cause. Rats fall away
+    {_s["decay"]:.1f}x from the inner ring to the outer; those outcomes average
+    {_s["placebo_decay"]:.1f}x. Rats is the only pair of the 36 we tested that beats its own
+    placebos on this.
+
+    | Outcome | {" | ".join(_ring_cols)} | decay |
+    | --- | {" | ".join("---:" for _ in _ring_cols)} | ---: |
+    {_ring_rows}
+
+    Still observational: these alleys were not assigned at random, and a month is a short window.
+    The full matrix of 36 pairs is in `pair_review.md`.
+    """
+    )
+
+    if min(_s["n_left"], _s["n_fast"]) < ALLEY_MIN_ARM:
+        alley_section = mo.md(
+            "### While the alley waits\n"
+            "Not enough alleys in this snapshot were left open long enough to compare against the "
+            "ones cleared quickly, so this section has nothing to show."
+        )
+    else:
+        alley_section = mo.vstack(
+            [
+                mo.md(
+                    f"""
+    ### While the alley waits
+
+    The clock above says how long a dirty alley waits. This asks what happens meanwhile.
+
+    Among alleys with no rat problem nearby to begin with, the ones the city left unfixed for a
+    month drew **{_s["lift"]:.0%} more rat reports within {_s["radius"]} m** over the next month
+    than the ones it cleared inside a week &mdash; **{_s["left_any"]:.0%}** of them got one,
+    against **{_s["fast_any"]:.0%}**. The extra reports sit right beside the alley and fade with
+    distance.
+    """
+                ),
+                # Control above the chart it changes, as with the sidebar and the map.
+                alley_compare,
+                mo.hstack([alley_growth_chart, alley_ring_chart], widths=[1, 1], gap=1.5, align="start"),
+                mo.accordion({"How we checked this (click to open)": _method}),
+            ]
+        )
+    alley_section
+    return
+
+
+@app.cell
+def _(mo):
     mo.md(
-        rf"""
+        r"""
     ### The unison call
 
-    One resident reports a broken streetlight. Then the same call, from all 55 neighborhoods at the
-    same second.
-
-    Those 55 calls did not happen &mdash; that is the point. The model was trained to answer exactly
-    this question, so the map below is its answer to a thought experiment: *file one identical
-    {STORM_TOPIC.lower()} request everywhere, and watch who gets an answer.*
-
-    An area turns green once **three in four** of its reports are closed. That is the bar because no
-    neighborhood ever reaches zero here: the best still has 7% of its streetlight reports open six
-    months later, and the worst has 38%. Press play, and keep an eye on
-    **{STORM_ORIGIN.split("/")[0]}**, where the call came from.
+    How long it takes for each neighborhood to respond to a complaint &mdash; visualized
     """
     )
     return
@@ -513,8 +570,12 @@ def _(bias_stats, mo):
     the advantage is {bias_stats["residual"]:+.2f} &mdash; nothing. On speed rather than eventual
     closure it points the other way ({bias_stats["fast"]:+.2f} against the share fixed inside a week).
 
-    Reporting rate is not civic engagement, it is a distress signal: it tracks vacancy at
-    {bias_stats["vacancy"]:+.2f}. That is why the clock above is fitted one topic at a time. Comparing
+    For the topics this notebook leads with &mdash; vacancy, streetlights, dumping &mdash; volume tracks
+    conditions rather than civic energy: reporting rate moves with vacancy at
+    {bias_stats["vacancy"]:+.2f}. We would not push that further. Published work using independent
+    ground truth (street surveys in Kansas City, pothole counts in Houston) finds the opposite for
+    *nuisance* categories, where poorer neighborhoods report **less** than their conditions warrant.
+    Both can hold at once, and it is why the clock above is fitted one topic at a time: comparing
     areas on a blend of topics compares their problems, not their service.
     """
         ),
@@ -574,6 +635,8 @@ def _(DOMAIN_ORDER, fix_days, mo, per, weight_sliders, window):
                         ("problem-statement", "Problem"),
                         ("data-overview", "Data"),
                         ("core-visualization", "Explore the map"),
+                        ("the-fix-clock", "The fix clock"),
+                        ("the-unison-call", "The unison call"),
                         ("insight-synthesis", "Insights"),
                         ("discussion-future-work", "Discussion"),
                         ("marimo-feedback", "marimo feedback"),
@@ -648,8 +711,9 @@ def _(mo, quadrant):
                 "### Need vs service, all 55 areas\n"
                 "Each dot is an area. **Bottom right** is the priority corner: high need, low service. "
                 "**Top left** gets more service than its need suggests. The pink ring is the area picked on the map.\n\n"
-                "Need and service are percentiles *within each topic*, averaged with your weights, so a +0.30 gap "
-                "means the area ranks 30 points higher on need than on service."
+                "Need and service are percentiles *within each topic*, averaged with your weights. The score is "
+                "not the distance between the two: it is how far **below the fitted service-on-need line** an area "
+                "sits, so a high score means it is served less than areas with the same amount of need."
             ),
         ],
         widths=[3, 2],
@@ -699,6 +763,50 @@ def _(insights, mo):
 
     {insights}
     """)
+    return
+
+
+@app.cell
+def _(TRIAGE_AHEAD, TRIAGE_FROM, fix_queue, fix_triage, mo, pl):
+    _t = fix_triage
+    mo.vstack(
+        [
+            mo.md(
+                f"""
+    ### Monday morning
+
+    Everything above describes Baltimore. This is the part a city could use on a Tuesday.
+
+    There are **{fix_queue.height:,}** requests open right now that have already been waiting more
+    than {TRIAGE_FROM} days. Some will close this week on their own. The model ranks them by the
+    chance they will *still* be open {TRIAGE_AHEAD} days from now &mdash; not by age, because age
+    alone cannot tell a request that is about to be handled from one that has been forgotten.
+
+    Rebuilt on the first half of the year and tested on the {_t["n"]:,} later requests it had never
+    seen: flagging the worst **{_t["flagged"]:,}** &mdash; a tenth of the queue &mdash; catches
+    **{_t["recall"]:.0%}** of everything that really did stay open. **{_t["precision"]:.0%}** of
+    those flags are right, against **{_t["base"]:.0%}** if you picked at random: a
+    **{_t["lift"]:.1f}x** improvement, ranking at **{_t["auc"]:.3f}**.
+    """
+            ),
+            mo.ui.table(
+                fix_queue.head(200).select(
+                    pl.col("risk").round(3).alias(f"still open in {TRIAGE_AHEAD}d"),
+                    pl.col("days_open").alias("waiting"),
+                    pl.col("domain").alias("problem"),
+                    "csa",
+                    "address",
+                    pl.col("sla_days").round(0).cast(pl.Int64).alias("city deadline"),
+                ),
+                selection=None,
+                page_size=10,
+            ),
+            mo.md(
+                f"<small>Top 200 of {fix_queue.height:,}, worst first. The deadline column is the "
+                f"city's own promised turnaround for that request type.</small>"
+            ),
+        ]
+    )
     return
 
 
@@ -935,6 +1043,9 @@ def _():
     # to mean anything here -- every area passes it inside three weeks -- and no area in this topic
     # ever reaches zero, so demanding all of them would paint the whole city as failing forever.
     STORM_ANSWERED = 0.25
+    # The work list. For a request already open this long, how likely is it to still be open this
+    # much later? Three weeks is far enough that the answer is not obvious and near enough to act on.
+    TRIAGE_FROM, TRIAGE_AHEAD = 7, 21
 
     # Colors: blue = over-served, orange = under-served (colorblind-safe pair).
     OVER, MID, UNDER = "#2b6cb0", "#f1f1f1", "#dd6b20"
@@ -960,6 +1071,8 @@ def _():
         STORM_ORIGIN,
         STORM_PREMISE,
         STORM_TOPIC,
+        TRIAGE_AHEAD,
+        TRIAGE_FROM,
         UNDER,
         VACANCY,
         VACANCY_SINCE,
@@ -1621,8 +1734,12 @@ def _(
 
         The classifier answers one question per interval: given this request is still open, does it
         close now? Multiplying the answers back together gives the survival curve. Boosting is what
-        lets it use per-request facts a per-area average cannot -- the SLA clock the city set, which
-        agency owns it, how it came in -- and that is where nearly all of the accuracy comes from.
+        lets it use per-request facts a per-area average cannot. Permutation importance says almost all
+        of that comes from one of them: shuffling the SLA date the city itself set costs 0.11 Brier at
+        seven days, against 0.06 for the topic, 0.002 for the owning agency and nothing at all for the
+        reporting channel. Shuffling the neighbourhood and every area statistic costs nothing
+        measurable. The strongest thing we know about how long you will wait is the deadline the city
+        wrote on your ticket when you filed it.
 
         Calibrating on later requests than it trained on matters because sharpness and honesty are
         different things: the raw scores rank requests well but overstate their confidence.
@@ -1726,6 +1843,28 @@ def _(
             return float((_r[_o == 1].sum() - _n1 * (_n1 + 1) / 2) / (_n1 * (len(_o) - _n1)))
 
         _dom = np.array([_k[0] for _k in _keys])
+
+        # Does ranking the queue actually work? Take the requests still open at TRIAGE_FROM that we
+        # can still see TRIAGE_AHEAD days past, rank them by the model's conditional risk, and check
+        # how many of the ones it puts at the top really do stay open.
+        _span = TRIAGE_FROM + TRIAGE_AHEAD
+        _q = (_room >= _span) & (_exit > TRIAGE_FROM)
+        _score = np.divide(_ml[_q, min(_span, FIX_HORIZON)],
+                           np.maximum(_ml[_q, TRIAGE_FROM], 1e-9))
+        _truth = (_exit[_q] > _span).astype(float)
+        _order = np.argsort(-_score)
+        _top = _order[: max(1, len(_order) // 10)]
+        _base = _truth.mean() if len(_truth) else 0.0
+        _triage = {
+            "n": int(_q.sum()),
+            "base": float(_base),
+            "auc": _auc(_truth, _score),
+            "precision": float(_truth[_top].mean()) if len(_top) else 0.0,
+            "recall": float(_truth[_top].sum() / max(_truth.sum(), 1)),
+            "flagged": int(len(_top)),
+        }
+        _triage["lift"] = _triage["precision"] / _base if _base else 0.0
+
         _rows = []
         for _t in horizons:
             _sel = _room >= _t
@@ -1747,7 +1886,7 @@ def _(
                 "gap": _gap(_ml[_sel, _t], _o), "gap_simple": _gap(_sv[_sel, _t], _o),
                 "ranking": float(np.average(_a, weights=_w)) if _a else float("nan"),
             })
-        return pl.DataFrame(_rows)
+        return pl.DataFrame(_rows), _triage
 
     return (calibration_check,)
 
@@ -1911,6 +2050,9 @@ def _(
 @app.cell
 def _(
     FIX_CALIB_FROM,
+    FIX_HORIZON,
+    TRIAGE_AHEAD,
+    TRIAGE_FROM,
     areas,
     fix_features,
     median_days,
@@ -1976,6 +2118,23 @@ def _(
     )
     fix_topics = fix_topics.join(_naive, on="domain", how="left")
 
+    # Every request still open at the snapshot, ranked by how likely it is to still be open three
+    # weeks from now. This is the part of the model a city could actually use: sorting a work list
+    # this way beats sorting it by age, because plenty of old requests are about to close anyway.
+    _idx_r = np.arange(_per_request.shape[0])
+    _age = np.minimum(_r["exit"].to_numpy().astype(int), FIX_HORIZON)
+    _later = np.minimum(_age + TRIAGE_AHEAD, FIX_HORIZON)
+    _now = _per_request[_idx_r, _age]
+    fix_queue = (
+        _r.with_columns(
+            pl.Series("days_open", _age),
+            pl.Series("risk", np.divide(_per_request[_idx_r, _later], np.maximum(_now, 1e-9))),
+        )
+        .filter(~pl.col("event") & (pl.col("days_open") >= TRIAGE_FROM))
+        .select("csa", "domain", "address", "days_open", "risk", "sla_days")
+        .sort("risk", descending=True)
+    )
+
     # The typical request of each kind in each area, so the sequence can show what the model was
     # handed before it answers.
     fix_inputs = _r.group_by("domain", "csa").agg(
@@ -1986,17 +2145,17 @@ def _(
         pl.col("vacancy").first().alias("vacancy"),
         pl.len().alias("n"),
     )
-    return fix_clock, fix_inputs, fix_model, fix_summary, fix_topics
+    return fix_clock, fix_inputs, fix_model, fix_queue, fix_summary, fix_topics
 
 
 @app.cell
 def _(FIX_HOLDOUT_FROM, areas, calibration_check, requests_311, snapshot_meta):
     # Rebuilt on the early part of the year and scored on the rest, so the clock is judged on
     # requests it never saw.
-    fix_calibration = calibration_check(
+    fix_calibration, fix_triage = calibration_check(
         requests_311, areas, snapshot_ts=snapshot_meta["snapshot_ts"], cutoff=FIX_HOLDOUT_FROM
     )
-    return (fix_calibration,)
+    return fix_calibration, fix_triage
 
 
 @app.cell
@@ -2029,6 +2188,283 @@ def _(
     overall = summarize(domain_scores, weight_sliders.value)
     robust = rank_stability(domain_scores)
     return domain_scores, overall, robust
+
+
+@app.cell
+def _():
+    # The one pair out of 36 we tested that behaves like a local mechanism: rubbish left out breeds
+    # rats beside it. The full matrix, and why the other 35 do not survive, is in pair_review.md.
+    ALLEY, RATS = "Dirty streets & alleys", "Rats"
+    ALLEY_WINDOW = 28  # days watched before the alley was reported, and after
+    ALLEY_FAST = 7  # closed this fast = the comparison arm
+    ALLEY_RINGS = [0, 50, 150, 400]  # metres; 150 is the headline radius
+    ALLEY_MIN_ARM = 100  # below this there is no comparison worth drawing
+    # Outcomes a dirty alley cannot cause. They measure how much of any "local" effect is really
+    # just reports of everything piling into the same few blocks.
+    ALLEY_PLACEBOS = ["Potholes", "Roads", "Streetlights", "Trees"]
+    return (
+        ALLEY,
+        ALLEY_FAST,
+        ALLEY_MIN_ARM,
+        ALLEY_PLACEBOS,
+        ALLEY_RINGS,
+        ALLEY_WINDOW,
+        RATS,
+    )
+
+
+@app.cell
+def _(
+    ALLEY,
+    ALLEY_FAST,
+    ALLEY_PLACEBOS,
+    ALLEY_RINGS,
+    ALLEY_WINDOW,
+    RATS,
+    datetime,
+    np,
+    pl,
+    requests_311,
+    shapely,
+    snapshot_meta,
+    timedelta,
+):
+    def alley_effect(requests, *, snapshot_ts):
+        """What grows next to a dirty alley the city has not come back to.
+
+        Two arms: alleys still open `ALLEY_WINDOW` days after they were reported, against alleys
+        closed inside `ALLEY_FAST` days. Around each one we count reports of another topic within
+        a radius, in the window before it was filed and the window after.
+
+        The arms are not alike to begin with. Rat reports near the alleys the city leaves open were
+        already 2.3x rarer, and already climbing before the alley was reported at all. A plain
+        before-and-after difference reads that head start as an effect, which is how this analysis
+        goes wrong. So the comparison keeps only alleys with **no** reports of the outcome nearby
+        in the preceding window. Both arms then start at exactly zero and the next month is a fair
+        comparison, at the cost of two thirds of the estimate: +0.16 becomes +0.07.
+        """
+        _end = datetime.fromisoformat(snapshot_ts)
+        _usable = requests.filter(~pl.col("proactive") & pl.col("x").is_not_null())
+        # An alley needs a full window on each side, so the first and last weeks are not eligible.
+        _opens = _usable["created"].min() + timedelta(days=ALLEY_WINDOW)
+        _cause = (
+            _usable.filter(
+                (pl.col("domain") == ALLEY)
+                & (pl.col("created") >= _opens)
+                & (pl.col("created") <= _end - timedelta(days=ALLEY_WINDOW))
+            )
+            .with_columns(
+                ((pl.coalesce("closed", pl.lit(_end)) - pl.col("created")).dt.total_seconds() / 86400)
+                .alias("open_days")
+            )
+            .with_columns(
+                pl.when(pl.col("open_days") <= ALLEY_FAST).then(pl.lit("Fixed within a week"))
+                .when(pl.col("open_days") >= ALLEY_WINDOW).then(pl.lit("Left open a month"))
+                .otherwise(pl.lit(None, dtype=pl.String))
+                .alias("arm")
+            )
+            .filter(pl.col("arm").is_not_null())
+        )
+
+        # Metres per degree at Baltimore's latitude. Accurate to centimetres across one city, and
+        # it needs no projection library, so this still works offline.
+        _lon_m, _lat_m = 111_320.0 * np.cos(np.radians(39.30)), 111_132.0
+
+        def _metres(frame):
+            return np.column_stack(
+                [frame["x"].to_numpy() * _lon_m, frame["y"].to_numpy() * _lat_m]
+            )
+
+        _cause_pts = shapely.points(_metres(_cause))
+        _filed = _cause["created"].to_numpy().astype("datetime64[s]").astype("int64")
+
+        def _nearby(outcome, radius):
+            """Days between each nearby report of `outcome` and the alley report it sits beside."""
+            _sub = _usable.filter(pl.col("domain") == outcome)
+            _ci, _oi = shapely.STRtree(shapely.points(_metres(_sub))).query(
+                _cause_pts, predicate="dwithin", distance=radius
+            )
+            _when = _sub["created"].to_numpy().astype("datetime64[s]").astype("int64")
+            return _ci, (_when[_oi] - _filed[_ci]) / 86400.0
+
+        def _windows(outcome, radius):
+            """Reports before and after each alley report, within `radius`."""
+            _ci, _off = _nearby(outcome, radius)
+            _before = np.bincount(_ci[(_off >= -ALLEY_WINDOW) & (_off < 0)], minlength=_cause.height)
+            _after = np.bincount(_ci[(_off > 0) & (_off < ALLEY_WINDOW)], minlength=_cause.height)
+            return _before, _after
+
+        _arm = _cause["arm"].to_numpy()
+        _is_left, _is_fast = _arm == "Left open a month", _arm == "Fixed within a week"
+        _radius = ALLEY_RINGS[2]
+        _before, _after = _windows(RATS, _radius)
+        _clean = _before == 0  # nothing nearby to begin with, so the arms start level
+        _left, _fast = _is_left & _clean, _is_fast & _clean
+
+        # How the gap opens day by day, which is the thing a single number cannot show.
+        _ci, _off = _nearby(RATS, _radius)
+        _sel = (_off > 0) & (_off < ALLEY_WINDOW)
+        _day, _idx = np.ceil(_off[_sel]).astype(int), _ci[_sel]
+        _growth = [{"day": 0, "arm": _a, "reports": 0.0} for _a in ("Left open a month", "Fixed within a week")]
+        for _d in range(1, ALLEY_WINDOW + 1):
+            _so_far = np.bincount(_idx[_day <= _d], minlength=_cause.height)
+            _growth += [
+                {"day": _d, "arm": "Left open a month", "reports": float(_so_far[_left].mean())},
+                {"day": _d, "arm": "Fixed within a week", "reports": float(_so_far[_fast].mean())},
+            ]
+
+        # Where the extra reports sit. A mechanism is local, so its inner ring should be much
+        # denser than its outer one; a whole block drifting upward looks flat.
+        _ring_ha = [
+            np.pi * (ALLEY_RINGS[_i + 1] ** 2 - ALLEY_RINGS[_i] ** 2) / 10_000
+            for _i in range(len(ALLEY_RINGS) - 1)
+        ]
+        _rings, _decay = [], {}
+        for _outcome in [RATS, *ALLEY_PLACEBOS]:
+            _cumulative = []
+            for _r in ALLEY_RINGS[1:]:
+                _, _out_after = _windows(_outcome, _r)
+                _cumulative.append(float(_out_after[_left].mean() - _out_after[_fast].mean()))
+            _by_ring = [_cumulative[0]] + [
+                _cumulative[_i] - _cumulative[_i - 1] for _i in range(1, len(_cumulative))
+            ]
+            _density = [_v / _ha for _v, _ha in zip(_by_ring, _ring_ha)]
+            _rings += [
+                {
+                    "outcome": _outcome,
+                    "ring": f"{ALLEY_RINGS[_i]}–{ALLEY_RINGS[_i + 1]} m",
+                    "order": _i,
+                    "density": _v,
+                }
+                for _i, _v in enumerate(_density)
+            ]
+            _decay[_outcome] = abs(_density[0]) / abs(_density[-1]) if _density[-1] else float("inf")
+
+        _a, _b = _after[_left], _after[_fast]
+        _diff = float(_a.mean() - _b.mean())
+        _se = float(np.sqrt(_a.var(ddof=1) / len(_a) + _b.var(ddof=1) / len(_b)))
+        return {
+            "growth": pl.DataFrame(_growth),
+            "rings": pl.DataFrame(_rings),
+            "decay": _decay,
+            "stats": {
+                "n_left": int(_left.sum()),
+                "n_fast": int(_fast.sum()),
+                "clean_share": float(_clean.mean()),
+                "left_rate": float(_a.mean()),
+                "fast_rate": float(_b.mean()),
+                "left_any": float((_a > 0).mean()),
+                "fast_any": float((_b > 0).mean()),
+                "diff": _diff,
+                "se": _se,
+                "sigma": _diff / _se if _se else 0.0,
+                "lift": _diff / _b.mean() if _b.mean() else 0.0,
+                # The imbalance that forced the clean-start restriction, kept so the method note
+                # can quote it rather than assert it.
+                "baseline_left": float(_before[_is_left].mean()),
+                "baseline_fast": float(_before[_is_fast].mean()),
+                "decay": _decay[RATS],
+                "placebo_decay": float(np.median([_decay[_o] for _o in ALLEY_PLACEBOS])),
+                "radius": _radius,
+                "window": ALLEY_WINDOW,
+            },
+        }
+
+    alley = alley_effect(requests_311, snapshot_ts=snapshot_meta["snapshot_ts"])
+    return (alley,)
+
+
+@app.cell
+def _(ALLEY_PLACEBOS, mo):
+    alley_compare = mo.ui.dropdown(
+        options=ALLEY_PLACEBOS, value="Potholes", label="**Compare rats against**"
+    )
+    return (alley_compare,)
+
+
+@app.cell
+def _(OVER, RATS, UNDER, alley, alley_compare, alt, pl):
+    _arms = ["Fixed within a week", "Left open a month"]
+    _s = alley["stats"]
+    alley_growth_chart = (
+        alt.Chart(alley["growth"])
+        .mark_line(strokeWidth=2.5)
+        .encode(
+            x=alt.X(
+                "day:Q",
+                title="Days after the alley was reported →",
+                scale=alt.Scale(domain=[0, _s["window"]], nice=False),
+            ),
+            y=alt.Y("reports:Q", title="Rat reports per alley"),
+            color=alt.Color(
+                "arm:N",
+                scale=alt.Scale(domain=_arms, range=[OVER, UNDER]),
+                sort=_arms,
+                legend=alt.Legend(orient="bottom", title=None),
+            ),
+            tooltip=[
+                alt.Tooltip("arm:N", title="Alley"),
+                alt.Tooltip("day:Q", title="Days after"),
+                alt.Tooltip("reports:Q", title="Rat reports per alley", format=".3f"),
+            ],
+        )
+        .properties(
+            width=300,
+            height=260,
+            # Titles are kept short and the numbers pushed into the subtitle, because Altair widens
+            # a chart to fit its title and two long ones overflow the column at laptop width.
+            title=alt.TitleParams(
+                "Both start clean, then the gap opens",
+                subtitle=[
+                    f"Running total within {_s['radius']} m, from the day the alley",
+                    "was reported. Neither arm had a rat report before it.",
+                ],
+                anchor="start",
+                subtitleColor="#777",
+            ),
+        )
+    )
+
+    _picked = alley_compare.value
+    _rats_decay, _other_decay = alley["decay"][RATS], alley["decay"][_picked]
+    _title = alt.TitleParams(
+        "Only rats fade with distance"
+        if _rats_decay > _other_decay
+        else f"Rats fade with distance, and so does {_picked.lower()}",
+        subtitle=[
+            f"Rats drop {_rats_decay:.1f}× from the inner ring to the outer;",
+            f"{_picked.lower()}, which an alley cannot cause, {_other_decay:.1f}×.",
+        ],
+        anchor="start",
+        subtitleColor="#777",
+    )
+    _shown = alley["rings"].filter(pl.col("outcome").is_in([RATS, _picked]))
+    _zero = alt.Chart(alt.Data(values=[{"z": 0}])).mark_rule(strokeDash=[4, 4], color="#888").encode(y="z:Q")
+    _lines = (
+        alt.Chart(_shown)
+        .mark_line(strokeWidth=2.5, point=alt.OverlayMarkDef(size=70, filled=True))
+        .encode(
+            x=alt.X(
+                "ring:N",
+                sort=alt.EncodingSortField("order"),
+                title="Distance from the alley →",
+                axis=alt.Axis(labelAngle=0),  # three short labels fit flat; Vega rotates by default
+            ),
+            y=alt.Y("density:Q", title="Extra reports per hectare", axis=alt.Axis(format=".2f")),
+            color=alt.Color(
+                "outcome:N",
+                scale=alt.Scale(domain=[RATS, _picked], range=[UNDER, "#9aa0a6"]),
+                legend=alt.Legend(orient="bottom", title=None),
+            ),
+            tooltip=[
+                alt.Tooltip("outcome:N", title="Outcome"),
+                alt.Tooltip("ring:N", title="Ring"),
+                alt.Tooltip("density:Q", title="Extra reports per hectare", format="+.4f"),
+            ],
+        )
+    )
+    alley_ring_chart = (_zero + _lines).properties(width=300, height=260, title=_title)
+    return alley_growth_chart, alley_ring_chart
 
 
 @app.cell
@@ -2250,7 +2686,7 @@ def _(anywidget, traitlets):
             const pts = model.get("points");
             $(".tx-title").textContent = zoomed
               ? `${sel}${pts.area === sel && pts.note ? ": " + pts.note : ""}`
-              : focus ? `${focus} only: orange areas need more than they get` : "Neglect gap: orange = high need, low service";
+              : focus ? `${focus} only: orange areas get less than their need predicts` : "Neglect: orange = served less than this much need predicts";
             $(".tx-legend").innerHTML = zoomed
               ? (focus === "Vacant buildings" ? "" :
                   `<span><i style="background:${DOT.open}"></i>still open (bigger = older)</span>` +
