@@ -5,9 +5,7 @@
   padding: 28px 28px 22px;
   border-radius: 14px;
   color: #fff;
-  background:
-    radial-gradient(circle at 85% 20%, rgba(221, 107, 32, 0.55), transparent 55%),
-    linear-gradient(135deg, #1a2433 0%, #22324a 60%, #2b6cb0 140%);
+  background: linear-gradient(135deg, #1a2433 0%, #22324a 55%, #2b6cb0 100%);
 }
 .hero h1 {
   margin: 4px 0 10px;
