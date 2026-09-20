@@ -37,6 +37,74 @@ def _():
     from sklearn.isotonic import IsotonicRegression
     import shapely
     import traitlets
+
+    @alt.theme.register("triage", enable=True)
+    def _triage_theme():
+        """One chart look for all fourteen of them, sharing the page's rules.
+
+        Greyscale furniture, colour only where it carries data, and the same red-to-green ramp the
+        maps use so a reader never has to learn two schemes. Gridlines sit well below the marks;
+        the skill guidance is explicit that they should not compete with the data.
+        """
+        _sans = "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif"
+        _ink, _muted, _rule = "#0b1116", "#7d8fa0", "#e3e8ed"
+        return {
+            "config": {
+                "background": "transparent",
+                "font": _sans,
+                "view": {"stroke": None, "continuousWidth": 380, "continuousHeight": 260},
+                "title": {
+                    "font": "Newsreader, Georgia, serif",
+                    "fontSize": 15,
+                    "fontWeight": 500,
+                    "color": _ink,
+                    "anchor": "start",
+                    "offset": 12,
+                    "subtitleFont": _sans,
+                    "subtitleColor": _muted,
+                    "subtitleFontSize": 11,
+                },
+                "axis": {
+                    "labelFont": _sans,
+                    "labelFontSize": 11,
+                    "labelColor": _muted,
+                    "titleFont": _sans,
+                    "titleFontSize": 11,
+                    "titleFontWeight": 500,
+                    "titleColor": _muted,
+                    "titlePadding": 8,
+                    "domain": False,
+                    "ticks": False,
+                    "labelPadding": 6,
+                    "gridColor": _rule,
+                    "gridWidth": 1,
+                },
+                "legend": {
+                    "labelFont": _sans,
+                    "labelFontSize": 11,
+                    "labelColor": _muted,
+                    "titleFont": _sans,
+                    "titleFontSize": 11,
+                    "titleColor": _muted,
+                    "symbolType": "square",
+                    "symbolSize": 90,
+                    "orient": "top",
+                    "direction": "horizontal",
+                    "offset": 4,
+                },
+                "range": {
+                    "category": ["#1a844e", "#c8912f", "#b83227", "#44586a", "#7d8fa0"],
+                    "diverging": ["#1a844e", "#c8912f", "#b83227"],
+                    "ramp": ["#1a844e", "#c8912f", "#b83227"],
+                },
+                "point": {"size": 70, "filled": True, "opacity": 0.85},
+                "circle": {"size": 70, "opacity": 0.85},
+                "bar": {"cornerRadius": 0},
+                "rule": {"color": _muted},
+                "text": {"font": _sans, "fontSize": 11, "color": _ink},
+            }
+        }
+
     return (
         Path,
         ThreadPoolExecutor,

@@ -213,3 +213,97 @@ h3[id] {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---- marimo's own furniture ----------------------------------------------------------------
+ * Everything above styles content this notebook authors. Everything below is marimo's: the prose
+ * container, tables, callouts, accordions. Left alone they carry the default look, which is the
+ * look of every other notebook, and that is most of the page by area.
+ */
+
+body {
+  background: #fbfaf8;
+}
+
+.markdown.prose > p,
+.markdown.prose > ul li,
+.markdown.prose > ol li,
+.markdown.prose > .paragraph {
+  font-size: 1.02rem;
+  line-height: 1.65;
+  color: #253340;
+}
+.markdown.prose {
+  --tw-prose-body: #253340;
+  --tw-prose-bold: var(--ink);
+  --tw-prose-headings: var(--ink);
+  --tw-prose-links: var(--ink);
+}
+.markdown.prose a {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+.markdown.prose blockquote {
+  border-left: 2px solid var(--promise);
+  font-style: normal;
+  color: var(--slate-600);
+}
+.markdown.prose small {
+  color: var(--slate-400);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+.markdown.prose code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  background: rgba(11, 17, 22, 0.05);
+  padding: 1px 5px;
+}
+
+/* Tables carry the most ink on the page after the maps. Numbers align, rules are hairlines, and
+ * the header is a label rather than a bar of colour. */
+marimo-table table {
+  font-size: 0.88rem;
+  border-collapse: collapse;
+}
+marimo-table thead th {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--slate-400);
+  border-bottom: 1px solid var(--ink);
+  padding-bottom: 7px;
+}
+marimo-table tbody td {
+  border-bottom: 1px solid var(--rule);
+  padding-top: 7px;
+  padding-bottom: 7px;
+  font-variant-numeric: tabular-nums;
+}
+marimo-table tbody tr:hover td {
+  background: rgba(11, 17, 22, 0.035);
+}
+
+/* A callout is an aside, not a warning label. */
+marimo-callout-output > div {
+  border: 0;
+  border-left: 2px solid var(--slate-600);
+  border-radius: 0;
+  background: rgba(11, 17, 22, 0.035);
+  padding: 16px 20px;
+}
+
+/* Accordion triggers render their label through a data-labels attribute, so they are fragile to
+ * style from outside. A hairline above each one is all that is safe and all that is needed. */
+marimo-accordion {
+  border-top: 1px solid var(--rule);
+  display: block;
+}
+
+marimo-sidebar {
+  background: #f6f4f1;
+}
+
+/* The board is an instrument and should not inherit the page's reading measure. */
+.board p {
+  max-width: 62ch;
+}
