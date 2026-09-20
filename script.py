@@ -895,10 +895,6 @@ def _():
     # to mean anything here -- every area passes it inside three weeks -- and no area in this topic
     # ever reaches zero, so demanding all of them would paint the whole city as failing forever.
     STORM_ANSWERED = 0.25
-    # The coda. Same call, different problem: on roads almost no area ever clears the bar, so the
-    # map barely moves and the contrast does the arguing.
-    STORM_CODA_TOPIC = "Roads"
-    STORM_CODA_ISSUE = "Now the same call, about the road itself."
 
     # Colors: blue = over-served, orange = under-served (colorblind-safe pair).
     OVER, MID, UNDER = "#2b6cb0", "#f1f1f1", "#dd6b20"
@@ -920,8 +916,6 @@ def _():
         OVER,
         ROBUST_SHARE,
         STORM_ANSWERED,
-        STORM_CODA_ISSUE,
-        STORM_CODA_TOPIC,
         STORM_ISSUE,
         STORM_ORIGIN,
         STORM_PREMISE,
@@ -1787,7 +1781,18 @@ def _(
         .group_by("domain").agg(pl.col("d").median().alias("naive_median_days"))
     )
     fix_topics = fix_topics.join(_naive, on="domain", how="left")
-    return fix_clock, fix_model, fix_summary, fix_topics
+
+    # The typical request of each kind in each area, so the sequence can show what the model was
+    # handed before it answers.
+    fix_inputs = _r.group_by("domain", "csa").agg(
+        pl.col("agency").mode().first().alias("agency"),
+        pl.col("method").mode().first().alias("method"),
+        pl.col("sla_days").median().alias("sla_days"),
+        pl.col("reports_per_1k").first().alias("reports_per_1k"),
+        pl.col("vacancy").first().alias("vacancy"),
+        pl.len().alias("n"),
+    )
+    return fix_clock, fix_inputs, fix_model, fix_summary, fix_topics
 
 
 @app.cell
@@ -2448,19 +2453,21 @@ def _(anywidget, traitlets):
                 </svg>
                 <div class="cs-hud">
                   <div class="cs-phase"></div>
-                  <div class="cs-clock"><span class="cs-dayw">Day <b class="cs-day">0</b></span>
+                  <div class="cs-clock"><span class="cs-dayw">Predicted day <b class="cs-day">0</b></span>
                     <span class="cs-speed"></span></div>
                   <div class="cs-count"></div>
+                <div class="cs-mark"></div>
+                <div class="cs-me"></div>
                 </div>
                 <div class="cs-board"></div>
                 <div class="cs-bar"><i class="cs-bar-done"></i></div>
+                <div class="cs-ev"></div>
                 <div class="cs-end"></div>
                 <div class="cs-cap"></div>
               </div>
               <div class="cs-ctrl">
                 <button class="cs-play">Play the call</button>
                 <button class="cs-skip" title="Jump to the final state">Skip to the end</button>
-                <button class="cs-coda" hidden></button>
                 <span class="cs-note"></span>
               </div>
             </div>`;
@@ -2471,12 +2478,10 @@ def _(anywidget, traitlets):
           const elSpeed = $(".cs-speed"), elCount = $(".cs-count"), elCap = $(".cs-cap");
           const elBoard = $(".cs-board"), btn = $(".cs-play"), skip = $(".cs-skip"), note = $(".cs-note");
           const elBar = $(".cs-bar"), elBarDone = $(".cs-bar-done"), elEnd = $(".cs-end");
-          const coda = $(".cs-coda");
+          const elEv = $(".cs-ev"), elMark = $(".cs-mark"), elMe = $(".cs-me");
 
-          let ds = "main";
-          const altOf = () => model.get("alt") || {};
-          const cur = () => (ds === "main" ? model.get("curves") : altOf().curves) || {};
-          const lab = () => (ds === "main" ? model.get("labels") : altOf().labels) || {};
+          const cur = () => model.get("curves") || {};
+          const lab = () => model.get("labels") || {};
           const cen = () => model.get("centroids") || {};
           const hz = () => model.get("horizon") || 180;
           const barOf = () => model.get("answered") || 0.25;
@@ -2523,6 +2528,7 @@ def _(anywidget, traitlets):
 
           // --- state --------------------------------------------------------------
           let raf = null, t0 = 0, fired = new Set(), phase = "idle", cdAt = null, running = false;
+          let markSet = new Set();
           let cleared = [], stampSet = new Set(), timers = [];
           const CD_A = 12000, CD_DAY_A = 30, CD_B = 9000;   // warped: slow to day 30, then run
           const dayAt = (e) => e <= CD_A
@@ -2567,6 +2573,21 @@ def _(anywidget, traitlets):
                 audio.tone(880 * Math.pow(0.945, cleared.length), 0, 0.42, 0.06, "triangle");
                 p.classList.add("cs-pop"); setTimeout(() => p.classList.remove("cs-pop"), 420);
               }
+            }
+            // Days are abstract. "Three months" is not.
+            const MARKS = [[7, "one week"], [30, "one month"], [90, "three months"], [180, "six months"]];
+            for (const [dd, text] of MARKS) {
+              if (d >= dd && !markSet.has(dd)) {
+                markSet.add(dd);
+                elMark.textContent = text;
+                elMark.classList.remove("cs-flash");
+                void elMark.offsetWidth;
+                elMark.classList.add("cs-flash");
+              }
+            }
+            const og = model.get("origin"), os = sAt(og, d);
+            if (os !== null) {
+              elMe.innerHTML = `${og.split("/")[0]} &mdash; <b>${Math.round(100 * os)}%</b> still open`;
             }
             const tot2 = Object.keys(cur()).length;
             elCount.innerHTML = `<b>${cleared.length}</b> of ${tot2} past three in four`;
@@ -2682,6 +2703,24 @@ def _(anywidget, traitlets):
           };
 
           // Every voice at once, a few milliseconds apart so it thickens instead of phasing.
+          // Show the inputs before the answer. Without this the countdown reads as a recording of
+          // what already happened rather than a forecast for a request nobody has filed yet.
+          const evidence = () => {
+            const e = model.get("evidence") || {};
+            const rows = e.rows || [];
+            elEv.innerHTML =
+              `<div class="cs-ev-h">what the model is given</div>`
+              + rows.map(([k, v], i) =>
+                  `<div class="cs-ev-r" style="animation-delay:${i * 130}ms">
+                     <span>${k}</span><b>${v}</b></div>`).join("")
+              + `<div class="cs-ev-f">gradient-boosted hazard model &middot; trained on
+                   ${e.trained || "?"} request-intervals &middot; tested on ${e.tested || "?"}
+                   it never saw</div>`;
+            elEv.classList.add("cs-on");
+            const id = setTimeout(() => elEv.classList.remove("cs-on"), 3600);
+            timers.push(id);
+          };
+
           const unison = () => {
             const clips = issueClips();
             audio.play("sfx_burst", 0, 0.7);
@@ -2732,6 +2771,7 @@ def _(anywidget, traitlets):
               else camTo(model.get("origin"), c.pad || 4.2, c.ms || 1400);
             }
             else if (c.kind === "bloom") bloom();
+            else if (c.kind === "evidence") evidence();
             else if (c.kind === "unison") unison();
             else if (c.kind === "collapse") collapse();
             else if (c.kind === "countdown") {
@@ -2777,10 +2817,6 @@ def _(anywidget, traitlets):
               : `<div class="cs-end-n"><b>all ${rows.length}</b> got three in four closed</div>
                  <div class="cs-end-s">inside ${hz()} days</div>`;
             elEnd.classList.add("cs-on");
-            if (ds === "main" && altOf().curves) {
-              coda.textContent = altOf().label || "Now the same call, about a road";
-              coda.hidden = false;
-            }
           };
 
           const tick = (now) => {
@@ -2798,7 +2834,9 @@ def _(anywidget, traitlets):
 
           const reset = () => {
             cancelAnimationFrame(raf); raf = null; running = false; phase = "idle";
-            fired = new Set(); cleared = []; stampSet = new Set();
+            fired = new Set(); cleared = []; stampSet = new Set(); markSet = new Set();
+            elEv.innerHTML = ""; elEv.classList.remove("cs-on");
+            elMark.textContent = ""; elMe.textContent = "";
             for (const id of timers) clearTimeout(id), clearInterval(id);
             timers = [];
             gC.innerHTML = ""; gR.innerHTML = ""; gS.innerHTML = "";
@@ -2824,25 +2862,7 @@ def _(anywidget, traitlets):
             running = true; t0 = performance.now(); raf = requestAnimationFrame(tick);
           };
 
-          const runCoda = () => {
-            ds = "alt";
-            reset();
-            ds = "alt";                            // reset() clears state, not which dataset we are on
-            coda.hidden = true;
-            btn.disabled = true; btn.textContent = "Playing\u2026";
-            elPhase.textContent = altOf().topic || "Roads";
-            elCap.textContent = altOf().issue || "";
-            for (const p of Object.values(paths)) p.classList.add("cs-lit");
-            fillsAt(0);
-            elDayW.classList.add("cs-on");
-            audio.play("sfx_bed", 0, 0.5);
-            phase = "countdown"; cdAt = performance.now(); running = true;
-            t0 = performance.now(); fired = new Set();
-            raf = requestAnimationFrame(tick);
-          };
-
-          coda.addEventListener("click", runCoda);
-          btn.addEventListener("click", () => { ds = "main"; start(); });
+          btn.addEventListener("click", start);
           skip.addEventListener("click", () => {
             reset(); audio.unlock(model.get("clips"));
             for (const p of Object.values(paths)) p.classList.add("cs-lit");
@@ -2911,6 +2931,31 @@ def _(anywidget, traitlets):
         .cs-br { display: flex; justify-content: space-between; padding: 1px 0; }
         .cs-br b { color: #f6ad55; font-variant-numeric: tabular-nums; }
 
+        .cs-ev { position: absolute; left: 50%; top: 48%; transform: translate(-50%,-50%) scale(0.97);
+                 z-index: 4; min-width: 330px; padding: 16px 20px; border-radius: 12px;
+                 background: rgba(8,12,18,0.92); border: 1px solid rgba(255,255,255,0.14);
+                 box-shadow: 0 18px 60px rgba(0,0,0,0.6); opacity: 0; pointer-events: none;
+                 transition: opacity 400ms ease, transform 400ms cubic-bezier(.2,1.3,.4,1); }
+        .cs-ev.cs-on { opacity: 1; transform: translate(-50%,-50%) scale(1); }
+        .cs-ev-h { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+                   color: #8b98a8; margin-bottom: 10px; }
+        .cs-ev-r { display: flex; justify-content: space-between; gap: 24px; padding: 3px 0;
+                   font-size: 12px; color: #9aa7b6; opacity: 0; animation: cs-rowin 260ms ease forwards; }
+        .cs-ev-r b { color: #e9eef5; font-weight: 600; }
+        @keyframes cs-rowin { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: none; } }
+        .cs-ev-f { margin-top: 12px; padding-top: 9px; border-top: 1px solid rgba(255,255,255,0.1);
+                   font-size: 10px; color: #6c7a8a; max-width: 330px; line-height: 1.5; }
+
+        .cs-mark { position: absolute; left: 50%; top: 30%; transform: translateX(-50%); z-index: 3;
+                   font-size: 30px; font-weight: 300; letter-spacing: 0.04em; color: #fff;
+                   opacity: 0; pointer-events: none; text-shadow: 0 2px 20px rgba(0,0,0,0.8); }
+        .cs-mark.cs-flash { animation: cs-markin 2100ms ease forwards; }
+        @keyframes cs-markin { 0% { opacity: 0; transform: translateX(-50%) scale(0.9); }
+                               18% { opacity: 1; transform: translateX(-50%) scale(1); }
+                               72% { opacity: 1; } 100% { opacity: 0; } }
+        .cs-me { position: absolute; left: 18px; bottom: 86px; z-index: 3; font-size: 12px; color: #8b98a8; }
+        .cs-me b { color: #ff9f8c; font-variant-numeric: tabular-nums; font-size: 15px; }
+
         .cs-bar { position: absolute; left: 18px; right: 18px; bottom: 74px; height: 4px; z-index: 3;
                   background: rgba(255,255,255,0.12); border-radius: 2px; opacity: 0; transition: opacity 400ms; }
         .cs-bar.cs-on { opacity: 1; }
@@ -2940,8 +2985,6 @@ def _(anywidget, traitlets):
                              background: transparent; color: inherit; font-size: 12px; padding: 5px 12px; }
         .cs-play { border-color: #dd6b20; color: #dd6b20; font-weight: 600; }
         .cs-play:disabled { opacity: 0.5; cursor: default; }
-        .cs-coda { cursor: pointer; border: 1px solid #c8382c; border-radius: 4px; background: transparent;
-                   color: #ff6b5a; font-size: 12px; font-weight: 600; padding: 5px 12px; }
         .cs-note { font-size: 11px; color: #999; margin-left: auto; }
         """
 
@@ -2956,7 +2999,7 @@ def _(anywidget, traitlets):
         clips = traitlets.Dict({}).tag(sync=True)
         horizon = traitlets.Int(180).tag(sync=True)
         answered = traitlets.Float(0.25).tag(sync=True)
-        alt = traitlets.Dict({}).tag(sync=True)
+        evidence = traitlets.Dict({}).tag(sync=True)
     return (CallStorm,)
 
 
@@ -2996,15 +3039,16 @@ def _(CallStorm, FIX_HORIZON, MAP_SIZE, map_centroids, map_shapes, mo):
 def _(
     DATA_DIR,
     STORM_ANSWERED,
-    STORM_CODA_ISSUE,
-    STORM_CODA_TOPIC,
     STORM_ISSUE,
     STORM_ORIGIN,
     STORM_PREMISE,
     STORM_TOPIC,
     base64,
     bloom_order,
+    fix_calibration,
     fix_clock,
+    fix_inputs,
+    fix_model,
     fix_summary,
     map_centroids,
     np,
@@ -3026,10 +3070,12 @@ def _(
             {"t": 8900, "kind": "bloom"},
             {"t": 11400, "kind": "unison"},
             {"t": 11400, "kind": "caption", "text": issue, "type": False},
-            {"t": 13600, "kind": "phase", "text": "Reported"},
-            {"t": 13800, "kind": "collapse"},
-            {"t": 14900, "kind": "phase", "text": "Waiting"},
-            {"t": 14900, "kind": "countdown"},
+            {"t": 13600, "kind": "phase", "text": "The model reads each one"},
+            {"t": 13700, "kind": "evidence"},
+            {"t": 17600, "kind": "phase", "text": "and predicts how long each will wait"},
+            {"t": 17800, "kind": "collapse"},
+            {"t": 19100, "kind": "phase", "text": "Predicted wait"},
+            {"t": 19100, "kind": "countdown"},
         ]
 
     def storm_clips(data_dir):
@@ -3070,25 +3116,23 @@ def _(
         }
         for _r in _rows.iter_rows(named=True)
     }
-    _coda = fix_summary.filter(
-        (pl.col("domain") == STORM_CODA_TOPIC) & pl.col("csa").is_in(list(map_centroids))
-    )
-    storm_widget.alt = {
-        "topic": STORM_CODA_TOPIC,
-        "issue": STORM_CODA_ISSUE,
-        "label": f"Now the same call, about a road",
-        "curves": {
-            _r["csa"]: np.rint(_S[_idx[(STORM_CODA_TOPIC, _r["csa"])]] * 100).astype(int).tolist()
-            for _r in _coda.iter_rows(named=True)
-        },
-        "labels": {
-            _r["csa"]: {
-                "n": _r["n"],
-                "clear": _answered_on(_S[_idx[(STORM_CODA_TOPIC, _r["csa"])]], STORM_ANSWERED),
-                "open180": round(float(_r["still_open_at_horizon"]), 3),
-            }
-            for _r in _coda.iter_rows(named=True)
-        },
+    # What the model is handed for this request, shown on screen before it answers. A viewer who
+    # cannot see the inputs has no way to tell a prediction from a recording of the past.
+    _o = fix_inputs.filter((pl.col("domain") == STORM_TOPIC) & (pl.col("csa") == STORM_ORIGIN))
+    _ex = _o.row(0, named=True) if _o.height else {}
+    storm_widget.evidence = {
+        "rows": [
+            ["problem type", STORM_TOPIC],
+            ["handled by", str(_ex.get("agency", "-"))],
+            ["reported via", str(_ex.get("method", "-"))],
+            ["city's own deadline", f"{_ex.get('sla_days', 0):.0f} days"],
+            ["how much this area calls", f"{_ex.get('reports_per_1k', 0):.0f} per 1,000 residents"],
+            ["vacant properties here", f"{_ex.get('vacancy', 0):.1f}%"],
+            ["past reports like it", f"{int(_ex.get('n', 0)):,}"],
+        ],
+        "trained": f"{fix_model['n_train']:,}",
+        "rounds": fix_model["rounds"],
+        "tested": f"{int(fix_calibration['n'].max()):,}",
     }
     storm_widget.answered = STORM_ANSWERED
     storm_widget.origin = STORM_ORIGIN
