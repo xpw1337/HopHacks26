@@ -16,7 +16,9 @@
 import marimo
 
 __generated_with = "0.24.2"
-app = marimo.App(width="medium", app_title="Baltimore Triage", css_file="app.css")
+# Full width so the maps can break the reading column. app.css puts prose back into a measure;
+# without that, body text would run the width of the screen and be unreadable.
+app = marimo.App(width="full", app_title="Baltimore Triage", css_file="app.css")
 
 
 @app.cell

@@ -307,3 +307,86 @@ marimo-sidebar {
 .board p {
   max-width: 62ch;
 }
+
+
+/* ---- measure and bleed ---------------------------------------------------------------------
+ * The app runs full width so the maps can break out. Text is pulled back to a reading measure
+ * here, because a 1600px line of prose is unreadable no matter how good the typeface is.
+ *
+ * Three widths, by what the thing is: an argument, a record, or a picture.
+ */
+:root {
+  --measure: 40rem;
+  --wide: 62rem;
+  --bleed: 96rem;
+}
+
+/* marimo renders markdown inside a Tailwind `contents` wrapper, which sets display: contents and
+ * therefore generates no box at all: max-width on it does nothing. The children are what get laid
+ * out, so they are what has to be measured. */
+.markdown.prose > .paragraph,
+.markdown.prose > h1,
+.markdown.prose > h2,
+.markdown.prose > h3,
+.markdown.prose > h4,
+.markdown.prose > ul,
+.markdown.prose > ol,
+.markdown.prose > blockquote,
+.markdown.prose > pre {
+  display: block;
+  max-width: var(--measure);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Inside a record, an instrument or a control row, the measure does not apply. */
+.slip .markdown.prose > *,
+.board .markdown.prose > *,
+marimo-callout-output .markdown.prose > * {
+  max-width: none;
+}
+
+/* Records and instruments sit wider than prose but still hold an edge. */
+.slip,
+.board,
+marimo-table,
+marimo-callout-output,
+marimo-accordion,
+marimo-download {
+  max-width: var(--wide);
+  margin-left: auto;
+  margin-right: auto;
+}
+.board .markdown,
+.slip .markdown {
+  max-width: none;
+}
+
+/* Pictures break the column. This is the whole point of running full width. */
+marimo-anywidget,
+marimo-tabs,
+marimo-lazy {
+  display: block;
+  width: 100%;
+  max-width: var(--bleed);
+  margin-left: auto;
+  margin-right: auto;
+}
+marimo-anywidget > *,
+marimo-lazy > * {
+  width: 100%;
+}
+
+/* Charts keep their own measure: an Altair chart at 1500px is not more legible, just wider. */
+.vega-embed {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+@media (max-width: 70rem) {
+  :root {
+    --measure: 100%;
+    --wide: 100%;
+    --bleed: 100%;
+  }
+}
