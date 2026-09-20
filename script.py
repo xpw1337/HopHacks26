@@ -106,8 +106,8 @@ def _(mo, snapshot_meta):
     calling 311.
 
     We score all 55 Community Statistical Areas on **need** (how bad conditions are) and
-    **service** (how well the city responds to that need). The **gap** between them is the
-    priority: high need with low service is where the city is missing.
+    **service** (how well the city responds to that need). The priority is the **neglect gap**:
+    how far an area falls below the service its level of need predicts.
 
     *(Data snapshot: {snapshot_meta["snapshot_date"]}.)*
     """)
@@ -119,10 +119,10 @@ def _(mo):
     mo.md(r"""
     ## Problem statement
 
-    Baltimore has a **neglect gap**: the distance between how bad conditions are in an area and how
-    much the city is already doing about it. Need on its own is not the story &mdash; every dashboard
-    in the city already shows that East and West Baltimore are struggling. The gap shows where that
-    struggle is going unanswered.
+    Baltimore has a **neglect gap**: areas that get less service than other areas carrying the same
+    amount of need. Need on its own is not the story &mdash; every dashboard in the city already
+    shows that East and West Baltimore are struggling. The gap shows where that struggle is going
+    unanswered.
 
     Nothing in the city's systems measures it, for three reasons:
 
@@ -138,8 +138,8 @@ def _(mo):
     instead be an area that stopped believing the city will come.
 
     **What this notebook gives an official:** the gap, measured for all 55 areas, sorted into the three
-    answers that decide a budget &mdash; the areas to **concentrate on**, where need runs well ahead of
-    service; the areas **already being worked**, where the response matches the problem; and the areas
+    answers that decide a budget &mdash; the areas to **concentrate on**, served least for the need they
+    carry; the areas **already being worked**, where the response matches the problem; and the areas
     getting **more attention than their conditions call for**.
     """)
     return
