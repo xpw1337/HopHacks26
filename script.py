@@ -934,11 +934,9 @@ def _(TRIAGE_AHEAD, TRIAGE_FROM, TRIAGE_TO, fix_queue, fix_stranded, fix_triage,
                 f"""
                 <div class="board">
                   <div class="board-line">
-                    <span>queue <b>{fix_queue.height:,}</b></span>
-                    <span>aged <b>{TRIAGE_FROM}&ndash;{TRIAGE_TO}d</b></span>
-                    <span>horizon <b>+{TRIAGE_AHEAD}d</b></span>
-                    <span>tested on <b>{fix_triage["n"]:,}</b> unseen</span>
-                    <span>ranking <b>{fix_triage["auc"]:.3f}</b></span>
+                    <span><b>{fix_queue.height:,}</b> requests open now</span>
+                    <span>filed <b>{TRIAGE_FROM}</b> to <b>{TRIAGE_TO}</b> days ago</span>
+                    <span>ranked by the next <b>{TRIAGE_AHEAD}</b> days</span>
                   </div>
                   <h3>Monday morning</h3>
                   <p>Everything above describes Baltimore. This is the one thing here a city could
