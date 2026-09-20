@@ -895,6 +895,10 @@ def _():
     # to mean anything here -- every area passes it inside three weeks -- and no area in this topic
     # ever reaches zero, so demanding all of them would paint the whole city as failing forever.
     STORM_ANSWERED = 0.25
+    # The coda. Same call, different problem: on roads almost no area ever clears the bar, so the
+    # map barely moves and the contrast does the arguing.
+    STORM_CODA_TOPIC = "Roads"
+    STORM_CODA_ISSUE = "Now the same call, about the road itself."
 
     # Colors: blue = over-served, orange = under-served (colorblind-safe pair).
     OVER, MID, UNDER = "#2b6cb0", "#f1f1f1", "#dd6b20"
@@ -916,6 +920,8 @@ def _():
         OVER,
         ROBUST_SHARE,
         STORM_ANSWERED,
+        STORM_CODA_ISSUE,
+        STORM_CODA_TOPIC,
         STORM_ISSUE,
         STORM_ORIGIN,
         STORM_PREMISE,
@@ -2454,6 +2460,7 @@ def _(anywidget, traitlets):
               <div class="cs-ctrl">
                 <button class="cs-play">Play the call</button>
                 <button class="cs-skip" title="Jump to the final state">Skip to the end</button>
+                <button class="cs-coda" hidden></button>
                 <span class="cs-note"></span>
               </div>
             </div>`;
@@ -2464,9 +2471,12 @@ def _(anywidget, traitlets):
           const elSpeed = $(".cs-speed"), elCount = $(".cs-count"), elCap = $(".cs-cap");
           const elBoard = $(".cs-board"), btn = $(".cs-play"), skip = $(".cs-skip"), note = $(".cs-note");
           const elBar = $(".cs-bar"), elBarDone = $(".cs-bar-done"), elEnd = $(".cs-end");
+          const coda = $(".cs-coda");
 
-          const cur = () => model.get("curves") || {};
-          const lab = () => model.get("labels") || {};
+          let ds = "main";
+          const altOf = () => model.get("alt") || {};
+          const cur = () => (ds === "main" ? model.get("curves") : altOf().curves) || {};
+          const lab = () => (ds === "main" ? model.get("labels") : altOf().labels) || {};
           const cen = () => model.get("centroids") || {};
           const hz = () => model.get("horizon") || 180;
           const barOf = () => model.get("answered") || 0.25;
@@ -2767,6 +2777,10 @@ def _(anywidget, traitlets):
               : `<div class="cs-end-n"><b>all ${rows.length}</b> got three in four closed</div>
                  <div class="cs-end-s">inside ${hz()} days</div>`;
             elEnd.classList.add("cs-on");
+            if (ds === "main" && altOf().curves) {
+              coda.textContent = altOf().label || "Now the same call, about a road";
+              coda.hidden = false;
+            }
           };
 
           const tick = (now) => {
@@ -2810,7 +2824,25 @@ def _(anywidget, traitlets):
             running = true; t0 = performance.now(); raf = requestAnimationFrame(tick);
           };
 
-          btn.addEventListener("click", start);
+          const runCoda = () => {
+            ds = "alt";
+            reset();
+            ds = "alt";                            // reset() clears state, not which dataset we are on
+            coda.hidden = true;
+            btn.disabled = true; btn.textContent = "Playing\u2026";
+            elPhase.textContent = altOf().topic || "Roads";
+            elCap.textContent = altOf().issue || "";
+            for (const p of Object.values(paths)) p.classList.add("cs-lit");
+            fillsAt(0);
+            elDayW.classList.add("cs-on");
+            audio.play("sfx_bed", 0, 0.5);
+            phase = "countdown"; cdAt = performance.now(); running = true;
+            t0 = performance.now(); fired = new Set();
+            raf = requestAnimationFrame(tick);
+          };
+
+          coda.addEventListener("click", runCoda);
+          btn.addEventListener("click", () => { ds = "main"; start(); });
           skip.addEventListener("click", () => {
             reset(); audio.unlock(model.get("clips"));
             for (const p of Object.values(paths)) p.classList.add("cs-lit");
@@ -2908,6 +2940,8 @@ def _(anywidget, traitlets):
                              background: transparent; color: inherit; font-size: 12px; padding: 5px 12px; }
         .cs-play { border-color: #dd6b20; color: #dd6b20; font-weight: 600; }
         .cs-play:disabled { opacity: 0.5; cursor: default; }
+        .cs-coda { cursor: pointer; border: 1px solid #c8382c; border-radius: 4px; background: transparent;
+                   color: #ff6b5a; font-size: 12px; font-weight: 600; padding: 5px 12px; }
         .cs-note { font-size: 11px; color: #999; margin-left: auto; }
         """
 
@@ -2922,6 +2956,7 @@ def _(anywidget, traitlets):
         clips = traitlets.Dict({}).tag(sync=True)
         horizon = traitlets.Int(180).tag(sync=True)
         answered = traitlets.Float(0.25).tag(sync=True)
+        alt = traitlets.Dict({}).tag(sync=True)
     return (CallStorm,)
 
 
@@ -2961,6 +2996,8 @@ def _(CallStorm, FIX_HORIZON, MAP_SIZE, map_centroids, map_shapes, mo):
 def _(
     DATA_DIR,
     STORM_ANSWERED,
+    STORM_CODA_ISSUE,
+    STORM_CODA_TOPIC,
     STORM_ISSUE,
     STORM_ORIGIN,
     STORM_PREMISE,
@@ -3032,6 +3069,26 @@ def _(
             "open180": round(float(_r["still_open_at_horizon"]), 3),
         }
         for _r in _rows.iter_rows(named=True)
+    }
+    _coda = fix_summary.filter(
+        (pl.col("domain") == STORM_CODA_TOPIC) & pl.col("csa").is_in(list(map_centroids))
+    )
+    storm_widget.alt = {
+        "topic": STORM_CODA_TOPIC,
+        "issue": STORM_CODA_ISSUE,
+        "label": f"Now the same call, about a road",
+        "curves": {
+            _r["csa"]: np.rint(_S[_idx[(STORM_CODA_TOPIC, _r["csa"])]] * 100).astype(int).tolist()
+            for _r in _coda.iter_rows(named=True)
+        },
+        "labels": {
+            _r["csa"]: {
+                "n": _r["n"],
+                "clear": _answered_on(_S[_idx[(STORM_CODA_TOPIC, _r["csa"])]], STORM_ANSWERED),
+                "open180": round(float(_r["still_open_at_horizon"]), 3),
+            }
+            for _r in _coda.iter_rows(named=True)
+        },
     }
     storm_widget.answered = STORM_ANSWERED
     storm_widget.origin = STORM_ORIGIN
