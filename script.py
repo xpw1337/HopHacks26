@@ -21,8 +21,9 @@ app = marimo.App(width="medium", app_title="Baltimore Triage", css_file="app.css
 
 @app.cell
 def _():
-    import base64
+    import io
     import json
+    import sys
     from concurrent.futures import ThreadPoolExecutor
     from datetime import datetime, timedelta
     from pathlib import Path
@@ -42,9 +43,9 @@ def _():
         ThreadPoolExecutor,
         alt,
         anywidget,
-        base64,
         datetime,
         httpx,
+        io,
         json,
         HistGradientBoostingClassifier,
         IsotonicRegression,
@@ -52,9 +53,35 @@ def _():
         np,
         pl,
         shapely,
+        sys,
         timedelta,
         traitlets,
     )
+
+
+@app.cell
+def _(Path, io, json, mo, pl, sys):
+    IS_WASM = sys.platform == "emscripten"
+    APP_ROOT = mo.notebook_location() or Path.cwd()
+
+    async def resource_bytes(path):
+        """Read a bundled public asset locally or through the browser's Fetch API."""
+        if IS_WASM:
+            from pyodide.http import pyfetch
+
+            response = await pyfetch(str(path))
+            if not response.ok:
+                raise RuntimeError(f"Could not load {path}: HTTP {response.status}")
+            return await response.bytes()
+        return Path(path).read_bytes()
+
+    async def resource_json(path):
+        return json.loads((await resource_bytes(path)).decode("utf-8"))
+
+    async def resource_parquet(path):
+        return pl.read_parquet(io.BytesIO(await resource_bytes(path)))
+
+    return APP_ROOT, IS_WASM, resource_bytes, resource_json, resource_parquet
 
 
 @app.cell
@@ -276,12 +303,15 @@ def _(FIX_HORIZON, fix_topics, mo, pl):
 
 
 @app.cell
-def _(DATA_DIR, json, mo):
+async def _(DATA_DIR, mo, resource_json):
     # Pre-recorded, replayed from disk. The notebook makes no API call here and none anywhere else:
     # a live voice service is one more thing that can fail in front of a reader, and it would make the
     # run non-reproducible. `scripts/make_call_demo.py` regenerates these assets by hand.
     _f = DATA_DIR / "demo_call" / "transcript.json"
-    demo_calls = json.loads(_f.read_text()) if _f.exists() else []
+    try:
+        demo_calls = await resource_json(_f)
+    except Exception:
+        demo_calls = []
     call_pick = mo.ui.dropdown(
         options={f'"{_c["text"][:52]}..."': _c["id"] for _c in demo_calls},
         value=f'"{demo_calls[0]["text"][:52]}..."' if demo_calls else None,
@@ -312,7 +342,7 @@ def _(DATA_DIR, call_pick, demo_calls, fix_summary, mo, pl):
             _verdict = f"Logged as **{_c['domain']}** in **{_c['csa']}**, which has too few requests like it to score."
         return mo.vstack(
             [
-                mo.audio(str(_audio)) if _c["audio"] and _audio.exists() else mo.md(""),
+                mo.audio(str(_audio)) if _c["audio"] else mo.md(""),
                 mo.md(f"> {_c['text']}"),
                 mo.md(f"{_verdict}  \n<small>{_c['address']}</small>"),
             ]
@@ -1442,74 +1472,96 @@ def _(
 
 
 @app.cell
-def _(Path, build_snapshot, json, mo, pl, shapely):
-    DATA_DIR = (mo.notebook_dir() or Path.cwd()) / "data"
+async def _(
+    APP_ROOT,
+    IS_WASM,
+    Path,
+    build_snapshot,
+    pl,
+    resource_json,
+    resource_parquet,
+    shapely,
+):
     _files = ["requests_311.parquet", "housing.parquet", "areas.geojson", "snapshot_meta.json"]
-    if not all((DATA_DIR / f).exists() for f in _files):
-        with mo.status.spinner("No saved snapshot found. Downloading from Open Baltimore (a few minutes, once)..."):
-            build_snapshot(DATA_DIR)
+    if IS_WASM:
+        DATA_DIR = APP_ROOT / "public" / "data"
+    else:
+        _public = Path(APP_ROOT) / "public" / "data"
+        _source = Path(APP_ROOT) / "data"
+        DATA_DIR = _public if all((_public / f).exists() for f in _files) else _source
+        if not all((Path(DATA_DIR) / f).exists() for f in _files):
+            build_snapshot(Path(DATA_DIR))
 
-    snapshot_meta = json.loads((DATA_DIR / "snapshot_meta.json").read_text())
-    areas_geo = json.loads((DATA_DIR / "areas.geojson").read_text())
+    snapshot_meta = await resource_json(DATA_DIR / "snapshot_meta.json")
+    areas_geo = await resource_json(DATA_DIR / "areas.geojson")
     # Display copy only: simplify boundaries to ~10 m (1.7 MB -> ~65 KB) so the map fits marimo's output limit.
     # Placing points in areas used the full-detail shapes when the snapshot was built.
     for _f in areas_geo["features"]:
         _shape = shapely.set_precision(shapely.geometry.shape(_f["geometry"]).simplify(1e-4, preserve_topology=True), 1e-5)
         _f["geometry"] = shapely.geometry.mapping(_shape)
-    requests_311 = pl.read_parquet(DATA_DIR / "requests_311.parquet")
-    housing = pl.read_parquet(DATA_DIR / "housing.parquet")
+    requests_311 = await resource_parquet(DATA_DIR / "requests_311.parquet")
+    housing = await resource_parquet(DATA_DIR / "housing.parquet")
     areas = pl.DataFrame([f["properties"] for f in areas_geo["features"]])
     return DATA_DIR, areas, areas_geo, housing, requests_311, snapshot_meta
 
 
 @app.cell
-def _(DOMAINS_311, LAYERS, ThreadPoolExecutor, live_count, mo, snapshot_meta):
-    def _open_count(item):
-        _topic, _types = item
-        _values = ",".join(f"'{t.replace(chr(39), chr(39) * 2)}'" for t in _types["reported"])
-        return _topic, live_count(
-            LAYERS["sr311"],
-            f"SRType IN ({_values}) AND SRStatus IN ('Open','New')",
-        )
-
-    with ThreadPoolExecutor(max_workers=6) as _pool:
-        _topic_counts = dict(_pool.map(_open_count, DOMAINS_311.items()))
-        _vbn = _pool.submit(live_count, LAYERS["open_notices"], "1=1").result()
-
-    _available = {topic: count for topic, count in _topic_counts.items() if count is not None}
-    if not _available and _vbn is None:
+def _(DOMAINS_311, IS_WASM, LAYERS, ThreadPoolExecutor, live_count, mo, snapshot_meta):
+    if IS_WASM:
         live_banner = mo.callout(
             mo.md(
-                f"**Live data unavailable right now.** Everything below uses the saved snapshot "
-                f"from {snapshot_meta['snapshot_date']}, so the notebook works offline."
-            ),
-            kind="warn",
-        )
-    else:
-        _request_summary = (
-            f"{sum(_available.values()):,} open resident requests across all "
-            f"{len(DOMAINS_311)} tracked 311 topics"
-            if len(_available) == len(DOMAINS_311)
-            else f"live request counts for {len(_available)} of {len(DOMAINS_311)} tracked 311 topics"
-        )
-        _vacancy_summary = (
-            f"{_vbn:,} open vacancy notices"
-            if _vbn is not None
-            else "vacancy count temporarily unavailable"
-        )
-        _breakdown = "\n".join(
-            f"- **{topic}:** {count:,}" if count is not None else f"- **{topic}:** unavailable"
-            for topic, count in _topic_counts.items()
-        )
-        live_banner = mo.callout(
-            mo.md(
-                f"**Live city workload:** {_request_summary} · {_vacancy_summary}.\n\n"
-                f"{_breakdown}\n\n"
-                f"The analysis below uses the fixed snapshot from {snapshot_meta['snapshot_date']}, "
-                f"so its text and charts stay consistent."
+                f"**Static deployment.** Everything below uses the reproducible snapshot from "
+                f"{snapshot_meta['snapshot_date']}; live API counts are disabled in the browser build."
             ),
             kind="info",
         )
+    else:
+        def _open_count(item):
+            _topic, _types = item
+            _values = ",".join(f"'{t.replace(chr(39), chr(39) * 2)}'" for t in _types["reported"])
+            return _topic, live_count(
+                LAYERS["sr311"],
+                f"SRType IN ({_values}) AND SRStatus IN ('Open','New')",
+            )
+
+        with ThreadPoolExecutor(max_workers=6) as _pool:
+            _topic_counts = dict(_pool.map(_open_count, DOMAINS_311.items()))
+            _vbn = _pool.submit(live_count, LAYERS["open_notices"], "1=1").result()
+
+        _available = {topic: count for topic, count in _topic_counts.items() if count is not None}
+        if not _available and _vbn is None:
+            live_banner = mo.callout(
+                mo.md(
+                    f"**Live data unavailable right now.** Everything below uses the saved snapshot "
+                    f"from {snapshot_meta['snapshot_date']}, so the notebook works offline."
+                ),
+                kind="warn",
+            )
+        else:
+            _request_summary = (
+                f"{sum(_available.values()):,} open resident requests across all "
+                f"{len(DOMAINS_311)} tracked 311 topics"
+                if len(_available) == len(DOMAINS_311)
+                else f"live request counts for {len(_available)} of {len(DOMAINS_311)} tracked 311 topics"
+            )
+            _vacancy_summary = (
+                f"{_vbn:,} open vacancy notices"
+                if _vbn is not None
+                else "vacancy count temporarily unavailable"
+            )
+            _breakdown = "\n".join(
+                f"- **{topic}:** {count:,}" if count is not None else f"- **{topic}:** unavailable"
+                for topic, count in _topic_counts.items()
+            )
+            live_banner = mo.callout(
+                mo.md(
+                    f"**Live city workload:** {_request_summary} · {_vacancy_summary}.\n\n"
+                    f"{_breakdown}\n\n"
+                    f"The analysis below uses the fixed snapshot from {snapshot_meta['snapshot_date']}, "
+                    f"so its text and charts stay consistent."
+                ),
+                kind="info",
+            )
     return (live_banner,)
 
 
@@ -1958,6 +2010,7 @@ def _(
 
 @app.cell
 def _(
+    DATA_DIR,
     FIX_CALIB_FROM,
     datetime,
     fit_fix_clock,
@@ -2135,23 +2188,57 @@ def _(
 
 
 @app.cell
-def _(
+async def _(
+    DATA_DIR,
     FIX_CALIB_FROM,
     FIX_HORIZON,
+    IS_WASM,
     TRIAGE_AHEAD,
     TRIAGE_FROM,
     TRIAGE_TO,
+    Path,
     areas,
     datetime,
     fix_features,
+    io,
+    json,
     median_days,
     np,
     pl,
     predict_fix_curves,
     requests_311,
+    resource_bytes,
+    resource_json,
+    resource_parquet,
     snapshot_meta,
     train_fix_model,
 ):
+    _cache = DATA_DIR / "precomputed"
+    _cached_files = [
+        "fix_clock.npz",
+        "fix_clock_cells.parquet",
+        "fix_inputs.parquet",
+        "fix_model.json",
+        "fix_queue.parquet",
+        "fix_summary.parquet",
+        "fix_topics.parquet",
+    ]
+    if IS_WASM or all((Path(_cache) / _name).exists() for _name in _cached_files):
+        _arrays = np.load(io.BytesIO(await resource_bytes(_cache / "fix_clock.npz")))
+        fix_clock = {
+            "cells": await resource_parquet(_cache / "fix_clock_cells.parquet"),
+            "S": _arrays["S"],
+            "n": _arrays["n"],
+            "n_open": _arrays["n_open"],
+        }
+        fix_inputs = await resource_parquet(_cache / "fix_inputs.parquet")
+        fix_queue = await resource_parquet(_cache / "fix_queue.parquet")
+        fix_summary = await resource_parquet(_cache / "fix_summary.parquet")
+        fix_topics = await resource_parquet(_cache / "fix_topics.parquet")
+        fix_model = await resource_json(_cache / "fix_model.json")
+        fix_stranded = int(fix_model.pop("fix_stranded"))
+        return fix_clock, fix_inputs, fix_model, fix_queue, fix_stranded, fix_summary, fix_topics
+
     # Trained once against the snapshot, never on the slider path: the sliders re-slice these curves,
     # they never retrain. Takes a few seconds.
     fix_model = train_fix_model(
@@ -2241,16 +2328,68 @@ def _(
         pl.col("vacancy").first().alias("vacancy"),
         pl.len().alias("n"),
     )
+    _local_cache = Path(DATA_DIR) / "precomputed"
+    _local_cache.mkdir(parents=True, exist_ok=True)
+    fix_clock["cells"].write_parquet(_local_cache / "fix_clock_cells.parquet")
+    np.savez_compressed(
+        _local_cache / "fix_clock.npz",
+        S=fix_clock["S"],
+        n=fix_clock["n"],
+        n_open=fix_clock["n_open"],
+    )
+    for _name, _frame in {
+        "fix_inputs": fix_inputs,
+        "fix_queue": fix_queue,
+        "fix_summary": fix_summary,
+        "fix_topics": fix_topics,
+    }.items():
+        _frame.write_parquet(_local_cache / f"{_name}.parquet")
+    (_local_cache / "fix_model.json").write_text(
+        json.dumps(
+            {
+                "n_train": fix_model["n_train"],
+                "n_calib": fix_model["n_calib"],
+                "rounds": fix_model["rounds"],
+                "fix_stranded": fix_stranded,
+            }
+        ),
+        encoding="utf-8",
+    )
     return fix_clock, fix_inputs, fix_model, fix_queue, fix_stranded, fix_summary, fix_topics
 
 
 @app.cell
-def _(FIX_HOLDOUT_FROM, areas, calibration_check, requests_311, snapshot_meta):
+async def _(
+    DATA_DIR,
+    FIX_HOLDOUT_FROM,
+    IS_WASM,
+    Path,
+    areas,
+    calibration_check,
+    json,
+    requests_311,
+    resource_json,
+    resource_parquet,
+    snapshot_meta,
+):
+    _cache = DATA_DIR / "precomputed"
+    if IS_WASM or all(
+        (Path(_cache) / _name).exists()
+        for _name in ("fix_calibration.parquet", "fix_triage.json")
+    ):
+        fix_calibration = await resource_parquet(_cache / "fix_calibration.parquet")
+        fix_triage = await resource_json(_cache / "fix_triage.json")
+        return fix_calibration, fix_triage
+
     # Rebuilt on the early part of the year and scored on the rest, so the clock is judged on
     # requests it never saw.
     fix_calibration, fix_triage = calibration_check(
         requests_311, areas, snapshot_ts=snapshot_meta["snapshot_ts"], cutoff=FIX_HOLDOUT_FROM
     )
+    _local_cache = Path(DATA_DIR) / "precomputed"
+    _local_cache.mkdir(parents=True, exist_ok=True)
+    fix_calibration.write_parquet(_local_cache / "fix_calibration.parquet")
+    (_local_cache / "fix_triage.json").write_text(json.dumps(fix_triage), encoding="utf-8")
     return fix_calibration, fix_triage
 
 
@@ -3770,7 +3909,6 @@ def _(
     STORM_ORIGIN,
     STORM_PREMISE,
     STORM_TOPIC,
-    base64,
     bloom_order,
     fix_calibration,
     fix_clock,
@@ -3806,18 +3944,15 @@ def _(
         ]
 
     def storm_clips(data_dir):
-        """Audio as base64 data URIs: the only transport that survives both run and static export.
-
-        Only the clips this sequence actually fires. The call panel above has its own, larger
-        recordings, and shipping those here would put a few hundred kilobytes on the wire for
-        audio that never plays.
-        """
+        """Same-origin audio URLs that work in both the local app and the WASM deployment."""
         _d = data_dir / "demo_call"
-        _want = lambda _f: _f.stem == "premise" or _f.stem.startswith(("issue_", "sfx_"))
+        _stems = [
+            "premise", "issue_1", "issue_2", "issue_3", "issue_4", "issue_5",
+            "sfx_bed", "sfx_burst", "sfx_ring",
+        ]
         return {
-            _f.stem: "data:audio/mpeg;base64," + base64.b64encode(_f.read_bytes()).decode()
-            for _f in (sorted(_d.glob("*.mp3")) if _d.exists() else [])
-            if _want(_f)
+            _stem: str(_d / f"{_stem}.mp3")
+            for _stem in _stems
         }
 
     _rows = fix_summary.filter(
