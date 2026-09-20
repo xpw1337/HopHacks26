@@ -258,6 +258,39 @@ def _(explorer):
 
 
 @app.cell
+def _(mo):
+    mo.md(r"""
+    ### The neglect skyline
+
+    The flat map is the decision tool; this 3D view is the bridge between scales. Each column starts
+    with the requests recorded in that area. Its **height is unresolved burden**: reports per 1,000
+    multiplied by the modelled share still open on that day. Its **color is the neglect gap**:
+    orange areas receive less service than their need predicts.
+
+    Drag the day control and the skyline falls as requests close. Rotate the city or choose one topic
+    to see how thousands of individual waits accumulate into a citywide pattern. Vacancy is excluded
+    here because it does not yet have a time-to-fix curve.
+    """)
+    return
+
+
+@app.cell
+def _(DOMAIN_ORDER, VACANCY, mo):
+    skyline_topic = mo.ui.dropdown(
+        options=["All 311 topics", *[d for d in DOMAIN_ORDER if d != VACANCY]],
+        value="All 311 topics",
+        label="**Skyline topic**",
+    )
+    return (skyline_topic,)
+
+
+@app.cell
+def _(mo, skyline_topic, skyline_view):
+    mo.vstack([skyline_topic, skyline_view])
+    return
+
+
+@app.cell
 def _(FIX_HORIZON, fix_topics, mo, pl):
     # The slowest topic carries the point, so let the data pick it rather than hard-coding a name.
     _no_median = fix_topics.filter(pl.col("median_days").is_null()).sort("n", descending=True)
@@ -2523,6 +2556,216 @@ def _(anywidget, traitlets):
 
 @app.cell
 def _(anywidget, traitlets):
+    class NeglectSkyline(anywidget.AnyWidget):
+        """Rotatable 3D columns: unresolved report burden over the Baltimore map."""
+
+        _esm = r"""
+        const OVER = [43, 108, 176], MID = [241, 241, 241], UNDER = [221, 107, 32];
+        const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+        const color = (gap, alpha=1) => {
+          if (gap === null || gap === undefined) return `rgba(140,140,140,${alpha})`;
+          const t = Math.max(-1, Math.min(1, gap / 0.6));
+          const c = t < 0 ? mix(MID, OVER, -t) : mix(MID, UNDER, t);
+          return `rgba(${c.join(",")},${alpha})`;
+        };
+        const shade = (css, amount) => {
+          const m = css.match(/rgba?\((\d+),(\d+),(\d+)/);
+          if (!m) return css;
+          return `rgb(${[1,2,3].map(i => Math.max(0, Math.min(255, +m[i] + amount))).join(",")})`;
+        };
+
+        function render({ model, el }) {
+          el.innerHTML = `
+            <div class="ns-wrap">
+              <div class="ns-head">
+                <div><b class="ns-title"></b><span class="ns-sub">unresolved reports per 1,000</span></div>
+                <div class="ns-city"></div>
+              </div>
+              <div class="ns-stage"><canvas></canvas><div class="ns-tip" hidden></div></div>
+              <div class="ns-controls">
+                <button class="ns-play" title="Play or pause">&#9654;</button>
+                <label>Day <b class="ns-day">0</b><input class="ns-time" type="range" min="0" step="1"></label>
+                <label>Rotate<input class="ns-angle" type="range" min="-65" max="65" value="-24" step="1"></label>
+              </div>
+              <div class="ns-legend">
+                <span>over-served</span><i class="ns-grad"></i><span>under-served</span>
+                <span class="ns-key">height = reports × share still open</span>
+              </div>
+            </div>`;
+
+          const canvas = el.querySelector("canvas"), stage = el.querySelector(".ns-stage");
+          const tip = el.querySelector(".ns-tip"), time = el.querySelector(".ns-time");
+          const angle = el.querySelector(".ns-angle"), play = el.querySelector(".ns-play");
+          const dayEl = el.querySelector(".ns-day"), title = el.querySelector(".ns-title");
+          const city = el.querySelector(".ns-city");
+          let day = 0, playing = false, raf = null, last = 0, columns = [], hovered = null;
+
+          const horizon = () => model.get("horizon");
+          const datum = (csa) => ((model.get("data") || {}).areas || {})[csa];
+          const at = (row, t) => row && row.curve ? row.curve[Math.min(t, row.curve.length - 1)] : null;
+
+          const resize = () => {
+            const dpr = window.devicePixelRatio || 1;
+            const w = Math.max(320, stage.clientWidth), h = Math.max(360, Math.min(600, w * 0.66));
+            canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
+            canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+            draw();
+          };
+
+          const drawPrism = (ctx, c, h, fill, picked) => {
+            const w = picked ? 13 : 10, d = w * 0.55, x = c.x, y = c.y, top = y - h;
+            ctx.beginPath();
+            ctx.moveTo(x, top - d); ctx.lineTo(x + w, top); ctx.lineTo(x, top + d); ctx.lineTo(x - w, top);
+            ctx.closePath(); ctx.fillStyle = shade(fill, 24); ctx.fill();
+            ctx.beginPath();
+            ctx.moveTo(x - w, top); ctx.lineTo(x, top + d); ctx.lineTo(x, y + d); ctx.lineTo(x - w, y);
+            ctx.closePath(); ctx.fillStyle = shade(fill, -28); ctx.fill();
+            ctx.beginPath();
+            ctx.moveTo(x, top + d); ctx.lineTo(x + w, top); ctx.lineTo(x + w, y); ctx.lineTo(x, y + d);
+            ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+            if (picked) {
+              ctx.strokeStyle = "#111"; ctx.lineWidth = 2;
+              ctx.strokeRect(x - w - 2, top - d - 2, 2 * w + 4, h + 2 * d + 4);
+            }
+            return { x, y, top: top - d, w: w + 3 };
+          };
+
+          const draw = () => {
+            const dpr = window.devicePixelRatio || 1, cw = canvas.width / dpr, ch = canvas.height / dpr;
+            const ctx = canvas.getContext("2d");
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, cw, ch);
+            const [W, H] = model.get("size"), theta = Number(angle.value) * Math.PI / 180;
+            const tilt = 0.48, scale = Math.min(cw / (W * 1.42), ch / (H * 0.88));
+            const baseY = ch * 0.73, cs = Math.cos(theta), sn = Math.sin(theta);
+            const screen = ([x, y]) => {
+              const dx = x - W / 2, dy = y - H / 2;
+              return [cw / 2 + (dx * cs - dy * sn) * scale, baseY + (dx * sn + dy * cs) * scale * tilt];
+            };
+
+            // Ground plane: the same 55 CSA shapes as the 2D decision map.
+            ctx.save();
+            ctx.translate(cw / 2, baseY); ctx.scale(scale, scale * tilt); ctx.rotate(theta); ctx.translate(-W / 2, -H / 2);
+            for (const sh of model.get("shapes")) {
+              const row = datum(sh.csa), p = new Path2D(sh.d);
+              ctx.fillStyle = row ? color(row.gap, 0.20) : "rgba(140,140,140,0.08)";
+              ctx.fill(p); ctx.strokeStyle = "rgba(90,90,90,0.28)"; ctx.lineWidth = 0.8 / scale; ctx.stroke(p);
+            }
+            ctx.restore();
+
+            let raw = [];
+            for (const [csa, point] of Object.entries(model.get("centroids"))) {
+              const row = datum(csa), value = at(row, day);
+              if (value === null || value === undefined) continue;
+              const [x, y] = screen(point);
+              raw.push({ csa, row, value, x, y });
+            }
+            const max = Math.max(...raw.map(d => d.value), 1e-9);
+            raw.sort((a, b) => a.y - b.y);
+            columns = [];
+            for (const c of raw) {
+              const h = 8 + Math.sqrt(Math.max(0, c.value) / max) * Math.min(190, ch * 0.36);
+              const hit = drawPrism(ctx, c, h, color(c.row.gap), c.csa === hovered);
+              columns.push({ ...c, ...hit, h });
+            }
+            dayEl.textContent = day; time.value = day;
+            const total = raw.reduce((s, d) => s + d.value, 0);
+            city.innerHTML = raw.length ? `<b>${total.toFixed(1)}</b> weighted unresolved reports per 1,000 across the skyline` : "No scored 311 topics at these weights";
+          };
+
+          const showTip = (event, c) => {
+            const box = stage.getBoundingClientRect(), sign = c.row.gap > 0 ? "+" : "";
+            tip.innerHTML = `<b>${c.csa}</b><br>${c.value.toFixed(2)} unresolved reports per 1,000` +
+              `<br>neglect gap ${c.row.gap == null ? "n/a" : sign + c.row.gap.toFixed(2)} · rank ${c.row.rank || "n/a"}`;
+            tip.hidden = false;
+            tip.style.left = `${Math.min(event.clientX - box.left + 12, box.width - 245)}px`;
+            tip.style.top = `${Math.max(6, event.clientY - box.top - 64)}px`;
+          };
+          canvas.addEventListener("mousemove", (event) => {
+            const box = canvas.getBoundingClientRect(), x = event.clientX - box.left, y = event.clientY - box.top;
+            const hit = [...columns].reverse().find(c => x >= c.x-c.w && x <= c.x+c.w && y >= c.top && y <= c.y+8);
+            const next = hit ? hit.csa : null;
+            if (next !== hovered) { hovered = next; draw(); }
+            if (hit) showTip(event, hit); else tip.hidden = true;
+          });
+          canvas.addEventListener("mouseleave", () => { hovered = null; tip.hidden = true; draw(); });
+
+          const setPlaying = (v) => {
+            playing = v; play.innerHTML = v ? "&#10073;&#10073;" : "&#9654;";
+            cancelAnimationFrame(raf);
+            if (v) { last = performance.now(); raf = requestAnimationFrame(step); }
+          };
+          const step = (now) => {
+            if (!playing) return;
+            if (now - last > 55) {
+              day += 1; last = now;
+              if (day >= horizon()) { day = horizon(); setPlaying(false); }
+              draw();
+            }
+            if (playing) raf = requestAnimationFrame(step);
+          };
+          play.addEventListener("click", () => {
+            if (!playing && day >= horizon()) day = 0;
+            setPlaying(!playing);
+          });
+          time.addEventListener("input", () => { setPlaying(false); day = Number(time.value); draw(); });
+          angle.addEventListener("input", draw);
+
+          const reset = () => {
+            time.max = horizon(); day = Math.min(day, horizon());
+            title.textContent = (model.get("data") || {}).topic || "Unresolved burden";
+            draw();
+          };
+          model.on("change:data", reset);
+          model.on("change:shapes", draw);
+          new ResizeObserver(resize).observe(stage);
+          requestAnimationFrame(resize);
+          return () => { cancelAnimationFrame(raf); };
+        }
+        export default { render };
+        """
+
+        _css = r"""
+        .ns-wrap { font: 13px system-ui, -apple-system, sans-serif; }
+        .ns-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin-bottom: 4px; }
+        .ns-title { font-size: 17px; }
+        .ns-sub { display: block; color: #888; font-size: 11px; }
+        .ns-city { color: #777; font-size: 11px; text-align: right; }
+        .ns-city b { color: #dd6b20; font-size: 17px; }
+        .ns-stage { position: relative; border-radius: 12px; overflow: hidden;
+                    background: radial-gradient(ellipse at 50% 72%, rgba(43,108,176,.10), transparent 58%),
+                                linear-gradient(180deg, rgba(127,127,127,.04), rgba(127,127,127,.10)); }
+        .ns-stage canvas { display: block; width: 100%; cursor: crosshair; }
+        .ns-tip { position: absolute; pointer-events: none; background: rgba(20,20,20,.93); color: white;
+                  border-radius: 6px; padding: 7px 9px; max-width: 245px; font-size: 11px; z-index: 2; }
+        .ns-controls { display: grid; grid-template-columns: 34px minmax(180px,1fr) minmax(130px,.55fr);
+                       align-items: center; gap: 12px; margin-top: 8px; }
+        .ns-controls label { display: grid; grid-template-columns: auto 1fr; gap: 7px; align-items: center;
+                             color: #777; font-size: 11px; }
+        .ns-controls input { width: 100%; accent-color: #dd6b20; }
+        .ns-play { width: 32px; height: 28px; cursor: pointer; border: 1px solid rgba(127,127,127,.45);
+                   border-radius: 4px; background: transparent; color: inherit; }
+        .ns-legend { display: flex; align-items: center; gap: 6px; color: #888; font-size: 11px; margin-top: 7px; }
+        .ns-grad { width: 130px; height: 9px; border-radius: 2px;
+                   background: linear-gradient(90deg,#2b6cb0,#f1f1f1,#dd6b20); }
+        .ns-key { margin-left: auto; }
+        @media (max-width: 600px) {
+          .ns-controls { grid-template-columns: 34px 1fr; }
+          .ns-controls label:last-child { grid-column: 2; }
+          .ns-city { display: none; }
+        }
+        """
+
+        shapes = traitlets.List([]).tag(sync=True)
+        size = traitlets.List([1000, 1000]).tag(sync=True)
+        centroids = traitlets.Dict({}).tag(sync=True)
+        data = traitlets.Dict({}).tag(sync=True)
+        horizon = traitlets.Int(180).tag(sync=True)
+    return (NeglectSkyline,)
+
+
+@app.cell
+def _(anywidget, traitlets):
     class CallStorm(anywidget.AnyWidget):
         """One call, then the same call from everywhere, then the wait.
 
@@ -3175,6 +3418,18 @@ def _(FIX_HORIZON, FixClock, MAP_SIZE, map_shapes, mo):
 
 
 @app.cell
+def _(FIX_HORIZON, MAP_SIZE, NeglectSkyline, map_centroids, map_shapes, mo):
+    skyline_widget = NeglectSkyline(
+        shapes=map_shapes,
+        size=MAP_SIZE,
+        centroids=map_centroids,
+        horizon=FIX_HORIZON,
+    )
+    skyline_view = mo.ui.anywidget(skyline_widget)
+    return skyline_view, skyline_widget
+
+
+@app.cell
 def _(CallStorm, FIX_HORIZON, MAP_SIZE, map_centroids, map_shapes, mo):
     # Created once, like the maps above. Everything else is pushed in through the raw handle.
     storm_widget = CallStorm(
@@ -3309,6 +3564,70 @@ def _(clock_topic, clock_widget, fix_clock, fix_summary, np, pl):
         _r["csa"]: {"n": _r["n"], "median": _r["median_days"]} for _r in _rows.iter_rows(named=True)
     }
     clock_widget.topic = f"{clock_topic.value} - resident-reported requests"
+    return
+
+
+@app.cell
+def _(
+    DOMAIN_ORDER,
+    VACANCY,
+    domain_scores,
+    fix_clock,
+    np,
+    pl,
+    skyline_topic,
+    skyline_widget,
+    weight_sliders,
+):
+    # Height at day t is need_rate × S(t). For "All", average those curves using the same
+    # topic weights as the ranking (vacancy is omitted because it has no S curve).
+    _idx = {(_d, _c): _i for _i, (_d, _c) in enumerate(fix_clock["cells"].iter_rows())}
+    _S = fix_clock["S"]
+    _topic = skyline_topic.value
+    _domains = (
+        [_topic]
+        if _topic != "All 311 topics"
+        else [d for d in DOMAIN_ORDER if d != VACANCY and weight_sliders.value.get(d, 0) > 0]
+    )
+    _scores = {
+        (_r["domain"], _r["csa"]): _r
+        for _r in domain_scores.filter(pl.col("domain").is_in(_domains)).iter_rows(named=True)
+    }
+    _areas = {}
+    for _csa in domain_scores["csa"].unique().to_list():
+        _num = np.zeros(_S.shape[1])
+        _den = 0.0
+        _gnum = 0.0
+        _gden = 0.0
+        for _d in _domains:
+            _r = _scores.get((_d, _csa))
+            _i = _idx.get((_d, _csa))
+            _w = 1.0 if _topic != "All 311 topics" else float(weight_sliders.value.get(_d, 0))
+            if _r is None or _i is None or _w <= 0:
+                continue
+            _num += _w * float(_r["need_rate"]) * _S[_i]
+            _den += _w
+            if _r["gap"] is not None:
+                _gnum += _w * float(_r["gap"])
+                _gden += _w
+        if _den:
+            _areas[_csa] = {
+                "gap": round(_gnum / _gden, 4) if _gden else None,
+                "curve": np.round(_num / _den, 3).tolist(),
+            }
+
+    # Rank the exact gap painted in this view; it is topic-specific or the current weighted 311 gap.
+    _ranked = sorted(
+        ((c, r["gap"]) for c, r in _areas.items() if r["gap"] is not None),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+    for _rank, (_csa, _) in enumerate(_ranked, 1):
+        _areas[_csa]["rank"] = _rank
+    skyline_widget.data = {
+        "topic": _topic,
+        "areas": _areas,
+    }
     return
 
 
