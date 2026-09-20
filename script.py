@@ -119,8 +119,8 @@ def _(ROBUST_SHARE, default_robust, method_check_stats, mo, snapshot_meta):
     so nobody sees the area that is failing on many fronts at once, or the area that has stopped calling 311.
 
     We score all 55 Community Statistical Areas on two things: **need** (how bad conditions are) and
-    **service** (how well the city responds to that need). The **gap** between them is the priority.
-    High need with low service is where the city is missing.
+    **service** (how long those problems stay open — the same clock as a single resident call).
+    The **gap** between them is the priority. High need with low service is where the city is missing.
 
     {_lead} That result does not depend on anyone's opinion about which problem matters most.
 
@@ -193,7 +193,7 @@ def _(mo):
 def _(mo, snapshot_meta):
     _c = snapshot_meta["counts"]
     _rows = [
-        ("311 Customer Service Requests (2026)", f'{_c["requests_311"]:,}', "Need (reports) and service (closing speed, proactive tickets)"),
+        ("311 Customer Service Requests (2026)", f'{_c["requests_311"]:,}', "Need (reports) and service (time still open, proactive tickets)"),
         ("Vacant Building Notices (open)", f'{_c["open_notices"]:,}', "Vacancy need (written by inspectors)"),
         ("Rehabs of Vacant Buildings", f'{_c["rehabs"]:,}', "Vacancy service"),
         ("Completed City Demolitions", f'{_c["demolitions"]:,}', "Vacancy service"),
@@ -227,11 +227,12 @@ def _(mo, snapshot_meta):
 
 
 @app.cell
-def _(mo, quality_panel, method_check):
+def _(mo, quality_panel, method_check, clock_vs_cutoff):
     mo.accordion(
         {
             "Data quality checks (click to open)": quality_panel,
             "Why service is a share of need, not a count (click to open)": method_check,
+            "Clock vs old 7-day cutoff (click to open)": clock_vs_cutoff,
         }
     )
     return
@@ -273,8 +274,9 @@ def _(FIX_HORIZON, fix_topics, mo, pl):
         rf"""
     ### The fix clock
 
-    The map above asks which areas are under-served. This one asks a blunter question: **if you report
-    it today, when does it get fixed?**
+    The map above ranks areas by the area under this same curve: how much of the first week a
+    typical request is already closed. This view asks the blunter question: **if you report it
+    today, when does it get fixed?**
 
     Press play. Every area starts fully shaded, and the color drains as its requests close. Whatever is
     still standing at the end never got fixed at all.
@@ -302,9 +304,9 @@ def _(DATA_DIR, json, mo):
 
 
 @app.cell
-def _(DATA_DIR, call_pick, demo_calls, fix_summary, mo, pl):
+def _(DATA_DIR, call_pick, demo_calls, domain_scores, fix_days, fix_summary, mo, overall, pl):
     def call_panel(calls, picked, summary):
-        """Show a reported complaint next to what the clock predicts for it."""
+        """Show a reported complaint next to the clock and that area's gap rank."""
         _c = next((_x for _x in calls if _x["id"] == picked), None)
         if _c is None:
             return mo.md("")
@@ -321,6 +323,19 @@ def _(DATA_DIR, call_pick, demo_calls, fix_summary, mo, pl):
             )
         else:
             _verdict = f"Logged as **{_c['domain']}** in **{_c['csa']}**, which has too few requests like it to score."
+        _gap = overall.filter(pl.col("csa") == _c["csa"])
+        _topic = domain_scores.filter((pl.col("csa") == _c["csa"]) & (pl.col("domain") == _c["domain"]))
+        if _gap.height and _topic.height:
+            _g, _t = _gap.row(0, named=True), _topic.row(0, named=True)
+            _svc = (
+                "not enough requests to score"
+                if _t["service_rate"] is None
+                else f"**{100 * _t['service_rate']:.0f}%** of the first {fix_days.value} days already closed"
+            )
+            _verdict += (
+                f" That same clock is what the map ranks: **{_c['csa']}** is gap rank "
+                f"**{_g['rank']}** of {overall.height}, and {_c['domain']} service is {_svc}."
+            )
         return mo.vstack(
             [
                 mo.audio(str(_audio)) if _c["audio"] and _audio.exists() else mo.md(""),
@@ -497,7 +512,7 @@ def _(DEFAULT_FIX_DAYS, DOMAIN_ORDER, mo):
         {d: mo.ui.slider(0, 3, step=0.5, value=1, show_value=True, full_width=True) for d in DOMAIN_ORDER}
     )
     fix_days = mo.ui.slider(
-        1, 60, step=1, value=DEFAULT_FIX_DAYS, show_value=True, label="Counts as a fast fix if closed within (days)"
+        1, 60, step=1, value=DEFAULT_FIX_DAYS, show_value=True, label="Rank time still open over the first (days)"
     )
     window = mo.ui.dropdown(
         options={"All of 2026 so far": 0, "Last 180 days": 180, "Last 90 days": 90},
@@ -704,7 +719,9 @@ def _(MIN_REQUESTS, mo):
 
     ### Future work
 
-    - **Time-to-fix curves** that follow still-open requests over time, not just a single cutoff.
+    - **Vacancy duration.** 311 ranking now uses the fix clock; vacant buildings still use share
+      handled since 2023, not how long a notice has sat.
+    - **A block-level compound score** so “one block, three tickets” is a number, not only a story.
     - **A tipping-point model** for vacancy spreading from one house to its neighbors.
     - **Owner matching** across property records to find the biggest holders of neglected property.
     - **A real test.** Save today's ranking and check in six months whether high-gap areas got more service.
@@ -720,7 +737,7 @@ def _(mo):
 
     **What worked well**
 
-    - **Reactivity made the method honest.** Sliders, the time window and the "fast fix" cutoff all feed
+    - **Reactivity made the method honest.** Sliders, the time window and the clock horizon all feed
       one scoring function. marimo re-runs only what depends on them, so the map, scatter, Gap Card,
       robust top 10 and CSV always agree.
     - **One file, two products.** `marimo edit` shows this notebook with its code; `marimo run` serves the
@@ -859,7 +876,7 @@ def _():
     DOMAIN_ORDER = [VACANCY, *DOMAINS_311]
     MIN_REQUESTS = 10  # below this, an area's service score for a topic is hidden
     VACANCY_SINCE = "2023-01-01"  # rehabs and demolitions counted from this date
-    DEFAULT_FIX_DAYS = 7  # at 30 days most sanitation topics are ~100% closed everywhere, so service can't tell areas apart
+    DEFAULT_FIX_DAYS = 7  # clock horizon; binary 30-day close rates saturate for sanitation
     ROBUST_SHARE = 0.8  # "robust" = in the top 10 under at least this share of random weightings
 
     FIX_HORIZON = 180  # days a reported request is followed for before we stop counting
@@ -1188,7 +1205,7 @@ def _(DOMAINS_311, LAYERS, live_count, mo, snapshot_meta):
 
 
 @app.cell
-def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta):
+def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, np, pl, timedelta):
     def pct_rank(col):
         """Percentile rank (0 = lowest, 1 = highest) within each topic, ignoring missing values."""
         _c = pl.col(col)
@@ -1208,11 +1225,34 @@ def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta
         _slope = pl.when(_sxx > 0).then(((_x - _xm) * (_y - _ym)).sum().over("domain") / _sxx).otherwise(0.0)
         return -(_y - (_ym + _slope * (pl.col(need_col) - _xm)))
 
-    def score_areas(requests_311, housing, areas, *, snapshot_ts, window_days, fix_days, per, metric="residual"):
+    def duration_service(fix_clock, t):
+        """Share of the first t days a typical request is already closed: 1 - mean(S[0:t]).
+
+        S(u) is the share still open on day u, the same curve the Fix Clock draws. The mean of
+        S from day 0 through day t is RMST(t) / (t + 1): the fraction of that window spent
+        unfixed. Subtracting from 1 makes a service share. Cells with a median of "never"
+        still get a finite number.
+        """
+        _S = np.asarray(fix_clock["S"], dtype=float)
+        _t = int(min(max(int(t), 0), _S.shape[1] - 1))
+        return fix_clock["cells"].with_columns(
+            pl.Series("duration_share", 1.0 - _S[:, : _t + 1].mean(axis=1)),
+            # UInt32 matches the vacancy n_service column so diagonal concat stays aligned.
+            pl.Series("n_clock", np.rint(np.asarray(fix_clock["n"])).astype(np.uint32)),
+        )
+
+    def score_areas(
+        requests_311, housing, areas, *, snapshot_ts, window_days, fix_days, per,
+        metric="residual", service="duration", fix_clock=None,
+    ):
         """Need and service per area and topic, as raw rates and percentiles, plus the gap.
 
         Service is always a share of need in the same topic (never a count per resident or parcel),
         so an area does not look well served just because it has a lot of problems.
+
+        `service="duration"` (default) is 1 − mean(S[0:t]) from the precomputed Fix Clock,
+        sliced at `fix_days`. Need still follows `window_days` and `per`. Vacancy is unchanged
+        (share handled since 2023). `service="fast_share"` is the old binary close-within-t rule.
 
         `metric="residual"` scores the gap as how far below the fitted service-on-need line an area
         sits. `metric="difference"` is the original need_pct - service_pct, kept for comparison: it
@@ -1229,16 +1269,27 @@ def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta
         _reported = _sr.filter(~pl.col("proactive"))
         _need = _reported.group_by("csa", "domain").agg(pl.len().alias("n_reports"))
 
-        # Service 1: share of reports closed within `fix_days` (still-open ones count as not closed).
-        # Only reports old enough to have had the full `fix_days` are counted.
-        _fast = (
-            _reported.filter(pl.col("created") <= _end - timedelta(days=fix_days))
-            .with_columns(
-                ((pl.col("closed") - pl.col("created")) <= pl.duration(days=fix_days)).fill_null(False).alias("fast")
+        # Service 1: how long requests stay open (default), or the old closed-within-t share.
+        if service == "duration":
+            if fix_clock is None:
+                raise ValueError("fix_clock is required when service='duration'")
+            _dur = duration_service(fix_clock, fix_days)
+            _fast = _dur.select(
+                "csa", "domain",
+                pl.col("n_clock").alias("n_service"),
+                pl.col("duration_share").alias("closed_fast_share"),
             )
-            .group_by("csa", "domain")
-            .agg(pl.len().alias("n_service"), pl.col("fast").mean().alias("closed_fast_share"))
-        )
+        elif service == "fast_share":
+            _fast = (
+                _reported.filter(pl.col("created") <= _end - timedelta(days=fix_days))
+                .with_columns(
+                    ((pl.col("closed") - pl.col("created")) <= pl.duration(days=fix_days)).fill_null(False).alias("fast")
+                )
+                .group_by("csa", "domain")
+                .agg(pl.len().alias("n_service"), pl.col("fast").mean().alias("closed_fast_share"))
+            )
+        else:
+            raise ValueError(f"unknown service={service!r}")
 
         # Service 2: proactive tickets per resident report (only topics that have proactive twins)
         _pro = _sr.filter(pl.col("proactive")).group_by("csa", "domain").agg(pl.len().alias("n_proactive"))
@@ -1330,7 +1381,7 @@ def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta
             .sort("gap", descending=True)
             .with_row_index("rank", offset=1)
         )
-    return neglect_residual, score_areas, summarize
+    return duration_service, neglect_residual, score_areas, summarize
 
 
 @app.cell
@@ -1684,6 +1735,7 @@ def _(
     DEFAULT_FIX_DAYS,
     DOMAIN_ORDER,
     areas,
+    fix_clock,
     housing,
     rank_stability,
     requests_311,
@@ -1692,13 +1744,106 @@ def _(
     summarize,
 ):
     # Fixed default settings: these back every number written in the text, so prose never drifts from charts.
+    # 311 service is the Fix Clock sliced at DEFAULT_FIX_DAYS (same S the map and demo calls use).
     default_scores = score_areas(
         requests_311, housing, areas,
         snapshot_ts=snapshot_meta["snapshot_ts"], window_days=0, fix_days=DEFAULT_FIX_DAYS, per="pop",
+        service="duration", fix_clock=fix_clock,
     )
     default_overall = summarize(default_scores, {d: 1 for d in DOMAIN_ORDER})
     default_robust = rank_stability(default_scores)
     return default_overall, default_robust, default_scores
+
+
+@app.cell
+def _(
+    DEFAULT_FIX_DAYS,
+    DOMAIN_ORDER,
+    areas,
+    default_overall,
+    default_scores,
+    fix_clock,
+    housing,
+    mo,
+    pl,
+    requests_311,
+    score_areas,
+    snapshot_meta,
+    spearman,
+    summarize,
+):
+    _kw = dict(
+        snapshot_ts=snapshot_meta["snapshot_ts"], window_days=0, per="pop",
+    )
+    _eq = {d: 1 for d in DOMAIN_ORDER}
+    _cut7 = score_areas(
+        requests_311, housing, areas, **_kw, fix_days=DEFAULT_FIX_DAYS, service="fast_share",
+    )
+    _cut30 = score_areas(requests_311, housing, areas, **_kw, fix_days=30, service="fast_share")
+    _dur30 = score_areas(
+        requests_311, housing, areas, **_kw, fix_days=30, service="duration", fix_clock=fix_clock,
+    )
+    _diff = score_areas(
+        requests_311, housing, areas, **_kw, fix_days=DEFAULT_FIX_DAYS,
+        service="duration", fix_clock=fix_clock, metric="difference",
+    )
+    _o_cut = summarize(_cut7, _eq)
+    _o_diff = summarize(_diff, _eq)
+    _cmp = default_overall.select("csa", pl.col("rank").alias("rank_duration")).join(
+        _o_cut.select("csa", pl.col("rank").alias("rank_cutoff")), on="csa",
+    )
+    _r_rank = spearman(_cmp["rank_duration"], _cmp["rank_cutoff"])
+    _r_need_gap = spearman(default_overall["need"], default_overall["gap"])
+    _r_need_gap_diff = spearman(_o_diff["need"], _o_diff["gap"])
+    _r_need_svc = spearman(default_overall["need"], default_overall["service"])
+    _san = ["Illegal dumping", "Dirty streets & alleys", "Rats", "Graffiti"]
+
+    def _sat(scores, label):
+        _s = scores.filter(pl.col("domain").is_in(_san) & pl.col("service_rate").is_not_null())
+        _n = _s.height
+        return {
+            "label": label,
+            "mean": float(_s["service_rate"].mean()) if _n else float("nan"),
+            "std": float(_s["service_rate"].std()) if _n else float("nan"),
+            "share_ge_95": float(_s.filter(pl.col("service_rate") >= 0.95).height / _n) if _n else float("nan"),
+        }
+
+    _rows = [
+        _sat(_cut7, "cutoff, 7 days"),
+        _sat(_cut30, "cutoff, 30 days"),
+        _sat(default_scores, "clock, 7 days"),
+        _sat(_dur30, "clock, 30 days"),
+    ]
+    clock_vs_cutoff_stats = {
+        "rank_spearman": _r_rank,
+        "need_gap_residual": _r_need_gap,
+        "need_gap_difference": _r_need_gap_diff,
+        "need_service": _r_need_svc,
+        "sanitation": _rows,
+    }
+    _table = "\n".join(
+        f"| {r['label']} | {r['mean']:.0%} | {r['std']:.2f} | {100 * r['share_ge_95']:.0f}% |" for r in _rows
+    )
+    clock_vs_cutoff = mo.md(f"""
+    The map ranks the **same clock** the resident call uses (share of the first {DEFAULT_FIX_DAYS}
+    days already closed), not a binary “closed within {DEFAULT_FIX_DAYS} days” cutoff. The old
+    cutoff is kept as `service="fast_share"` so we can check the two rankings against each other.
+
+    - Gap rank, clock vs cutoff (equal weights): Spearman **{_r_rank:+.2f}**.
+    - Need vs gap, residual (what the map uses): **{_r_need_gap:+.2f}**. Need vs gap, raw
+      need − service: **{_r_need_gap_diff:+.2f}**. The residual keeps the ranking from becoming
+      a need map.
+    - Need vs service percentiles: **{_r_need_svc:+.2f}**.
+
+    Sanitation (dumping, dirty streets, rats, graffiti). At 30 days the old cutoff saturates.
+    The clock still notices *when* inside the window a ticket closed, so we keep the default
+    horizon at {DEFAULT_FIX_DAYS} days.
+
+    | Measure | Mean service | Std | Share ≥ 95% |
+    | --- | --- | --- | --- |
+    {_table}
+    """)
+    return clock_vs_cutoff, clock_vs_cutoff_stats
 
 
 @app.cell
@@ -1784,6 +1929,7 @@ def _(FIX_HOLDOUT_FROM, areas, calibration_check, requests_311, snapshot_meta):
 @app.cell
 def _(
     areas,
+    fix_clock,
     fix_days,
     housing,
     mo,
@@ -1800,10 +1946,12 @@ def _(
         sum(weight_sliders.value.values()) == 0,
         mo.callout(mo.md("All topic weights are 0. Turn at least one slider up."), kind="warn"),
     )
+    # Re-slice the trained clock at the slider horizon. Need follows the window / per controls.
     domain_scores = score_areas(
         requests_311, housing, areas,
         snapshot_ts=snapshot_meta["snapshot_ts"],
         window_days=window.value, fix_days=fix_days.value, per=per.value,
+        service="duration", fix_clock=fix_clock,
     )
     overall = summarize(domain_scores, weight_sliders.value)
     robust = rank_stability(domain_scores)
@@ -2836,7 +2984,7 @@ def _(clock_topic, clock_widget, fix_clock, fix_summary, np, pl):
 def _(VACANCY, domain_scores, fix_days, overall, pl, triage_widget):
     def _detail(r):
         _svc = "not enough requests" if r["service_rate"] is None else f"{r['service_rate']:.0%}"
-        _svc_label = "handled since 2023" if r["domain"] == VACANCY else f"closed within {fix_days.value} days"
+        _svc_label = "handled since 2023" if r["domain"] == VACANCY else f"of the first {fix_days.value} days already closed"
         _pro = "" if r["proactive_share"] is None else f" · proactive share {r['proactive_share']:.0%}"
         return f"{r['n_reports']:,} reports ({r['need_rate']:.1f} per 1,000) · {_svc} {_svc_label}{_pro}"
 
@@ -3102,7 +3250,7 @@ def _(mo, overall, robust, pl, fix_days, window, per):
         data=_csv.encode("utf-8"),
         filename="baltimore_triage_dispatch.csv",
         mimetype="text/csv",
-        label=f"Download dispatch list (CSV) · fast fix = {fix_days.value} days · {window.selected_key} · 311 need per 1,000 {'residents' if per.value == 'pop' else 'parcels'}",
+        label=f"Download dispatch list (CSV) · clock horizon = {fix_days.value} days · {window.selected_key} · 311 need per 1,000 {'residents' if per.value == 'pop' else 'parcels'}",
     )
     return (dispatch_download,)
 
@@ -3165,8 +3313,9 @@ def _(VACANCY, alt, default_scores, mo, neglect_residual, pl, spearman):
             | --- | --- | --- |
             {_rows}
 
-            The same rule holds for every topic. 311 service is the **share** of that topic's requests closed
-            in time, and proactive work is proactive tickets **per resident report**. Neither grows just
+            The same rule holds for every topic. 311 service is how long that topic's requests stay
+            open: the share of the first week already closed, read off the same Fix Clock the map
+            ranks. Proactive work is proactive tickets **per resident report**. Neither grows just
             because an area has more problems.
             """),
             _chart,
@@ -3252,7 +3401,7 @@ def _(
         else ""
     )
     insights = f"""
-    All numbers use the default settings (equal weights, all of 2026, fast fix = {DEFAULT_FIX_DAYS} days).
+    All numbers use the default settings (equal weights, all of 2026, clock horizon = {DEFAULT_FIX_DAYS} days).
 
     1. **A short list holds up no matter what you weigh.** {_robust_text} The #1 gap under equal weights is
        **{_top["csa"]}** (widest topics: {_top["widest_gaps"]}). *See the robust top 10 chart.*
@@ -3263,7 +3412,8 @@ def _(
        share of vacant buildings handled, they move to {_m["top5_rank_new"]:.0f}: the more vacancy an area
        has, the *smaller* the share the city gets to. *See "Why service is a share of need" in the Data overview.*
 
-    3. **Response speed depends on where you live.** Streetlight reports closed within {DEFAULT_FIX_DAYS} days range from
+    3. **How long a fix takes depends on where you live.** Streetlight service (share of the first
+       {DEFAULT_FIX_DAYS} days already closed, same clock as the map) ranges from
        {_worst["service_rate"]:.0%} in **{_worst["csa"]}** to {_best["service_rate"]:.0%} in **{_best["csa"]}**.
        {_quiet_text} *See the Gap Card and "These may be worse than they look."*
     """
