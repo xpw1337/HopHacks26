@@ -58,34 +58,42 @@ def _():
 
 
 @app.cell
-def _(default_overall, default_robust, mo, requests_311, snapshot_meta):
-    _c = snapshot_meta["counts"]
-    _open = requests_311.filter(requests_311["closed"].is_null() & ~requests_311["proactive"]).height
-    _robust = default_robust.filter(default_robust["verdict"] == "Robust").height
-    mo.vstack(
-        [
-            mo.Html(
-                """
-                <div class="hero">
-                  <p class="hero-eyebrow">Open Baltimore · 55 Community Statistical Areas · 2026</p>
-                  <h1>Baltimore Triage: what to fix next</h1>
-                  <p class="hero-lede">Most city dashboards show where things are bad. This one shows where things
-                  are bad <em>and the city is not responding</em>, down to the street address.</p>
-                </div>
-                """
-            ),
-            mo.hstack(
-                [
-                    mo.stat(f"{_c['requests_311'] + _c['open_notices'] + _c['rehabs'] + _c['demolitions']:,}", label="City records joined", caption="311 + vacant building files", bordered=True),
-                    mo.stat(f"{_open:,}", label="Resident requests still open", caption=f"as of {snapshot_meta['snapshot_date']}", bordered=True),
-                    mo.stat(default_overall["csa"][0], label="Widest gap, equal weights", caption="#1 of 55 areas", bordered=True),
-                    mo.stat(f"{_robust}", label="Robust top-10 areas", caption="hold up under any weighting", bordered=True),
-                ],
-                widths="equal",
-                gap=1,
-            ),
-        ],
-        gap=1,
+def _(datetime, mo, pl, requests_311, snapshot_meta):
+    # The opening is not a claim about Baltimore, it is one of Baltimore's own records. The worst
+    # still-open streetlight report in the file, printed the way the city filed it.
+    _end = datetime.fromisoformat(snapshot_meta["snapshot_ts"])
+    _worst = (
+        requests_311.filter(
+            ~pl.col("proactive") & pl.col("closed").is_null() & (pl.col("domain") == "Streetlights")
+        )
+        .with_columns(
+            ((_end - pl.col("created")).dt.total_seconds() / 86400).round(0).cast(pl.Int64).alias("days"),
+            ((pl.col("due") - pl.col("created")).dt.total_seconds() / 86400).round(0).cast(pl.Int64).alias("sla"),
+        )
+        .sort("days", descending=True)
+        .row(0, named=True)
+    )
+    _street = _worst["address"].split(",")[0].title()
+
+    mo.Html(
+        f"""
+        <div class="slip">
+          <p class="slip-kicker">Baltimore City 311 &nbsp;&nbsp; service request &nbsp;&nbsp; still open</p>
+          <h1>A streetlight on {_street} has been out for {_worst["days"]} days.</h1>
+          <p class="slip-lede">The city gave itself {_worst["sla"]} days to fix it. Nobody has closed
+          the ticket, and nothing about that is unusual. This is what happens to a request after it is
+          filed, for all {requests_311.filter(~pl.col("proactive")).height:,} of them, and what the
+          waiting depends on.</p>
+          <dl class="slip-record">
+            <div class="slip-field"><dt>request type</dt><dd>{_worst["sr_type"]}</dd></div>
+            <div class="slip-field"><dt>neighborhood</dt><dd>{_worst["csa"].split("/")[0]}</dd></div>
+            <div class="slip-field"><dt>filed</dt><dd>{_worst["created"].strftime("%d %b %Y")}</dd></div>
+            <div class="slip-field is-promise"><dt>city&rsquo;s deadline</dt><dd>{_worst["sla"]} days</dd></div>
+            <div class="slip-field is-late"><dt>open for</dt><dd>{_worst["days"]} days</dd></div>
+            <div class="slip-field"><dt>status</dt><dd>{_worst["status"]}</dd></div>
+          </dl>
+        </div>
+        """
     )
     return
 
@@ -842,28 +850,33 @@ def _(TRIAGE_AHEAD, TRIAGE_FROM, TRIAGE_TO, fix_queue, fix_stranded, fix_triage,
     _t = fix_triage
     mo.vstack(
         [
-            mo.md(
+            mo.Html(
                 f"""
-    ### Monday morning
-
-    Everything above describes Baltimore. This is the one thing here a city could act on.
-
-    Two requests, both about {TRIAGE_TO} days old. One will be closed by the end of the month; the
-    other has effectively already been lost, and nobody at the city knows which is which. That is the
-    question the model answers, and it only answers it in a narrow window: before a week there is not
-    enough to go on, and after about a month it stops discriminating because by then almost nothing
-    moves. **{fix_stranded:,}** of the open requests are already past that point.
-
-    So this is the {fix_queue.height:,} requests currently between {TRIAGE_FROM} and {TRIAGE_TO} days
-    old, ranked by the chance they are *still* open {TRIAGE_AHEAD} days from now. Sorting a work list
-    by age cannot do this: every request here is roughly the same age.
-
-    Rebuilt on the first half of the year and tested on the {fix_triage["n"]:,} later requests it had
-    never seen: flag the worst tenth and **{fix_triage["precision"]:.0%}** of those flags are right
-    against **{fix_triage["base"]:.0%}** at random &mdash; a **{fix_triage["lift"]:.1f}x**
-    improvement, catching **{fix_triage["recall"]:.0%}** of everything that really did stay open,
-    ranking at **{fix_triage["auc"]:.3f}**.
-    """
+                <div class="board">
+                  <div class="board-line">
+                    <span>queue <b>{fix_queue.height:,}</b></span>
+                    <span>aged <b>{TRIAGE_FROM}&ndash;{TRIAGE_TO}d</b></span>
+                    <span>horizon <b>+{TRIAGE_AHEAD}d</b></span>
+                    <span>tested on <b>{fix_triage["n"]:,}</b> unseen</span>
+                    <span>ranking <b>{fix_triage["auc"]:.3f}</b></span>
+                  </div>
+                  <h3>Monday morning</h3>
+                  <p>Everything above describes Baltimore. This is the one thing here a city could
+                  act on. Two requests, both about {TRIAGE_TO} days old: one will be closed by the end
+                  of the month, the other has effectively already been lost, and nobody at the city
+                  knows which is which.</p>
+                  <p>Below are the <strong>{fix_queue.height:,}</strong> requests currently between
+                  {TRIAGE_FROM} and {TRIAGE_TO} days old, ranked by the chance they are still open
+                  {TRIAGE_AHEAD} days from now. Sorting by age cannot do this &mdash; every request
+                  here is roughly the same age. Flag the worst tenth and
+                  <strong>{fix_triage["precision"]:.0%}</strong> of those flags are right against
+                  <strong>{fix_triage["base"]:.0%}</strong> at random, catching
+                  <strong>{fix_triage["recall"]:.0%}</strong> of everything that really did stay open.</p>
+                  <p>The model stops discriminating past about a month, once the curve flattens and
+                  almost nothing moves. <strong>{fix_stranded:,}</strong> open requests are already
+                  past that point.</p>
+                </div>
+                """
             ),
             mo.ui.table(
                 fix_queue.head(150).select(
@@ -3073,7 +3086,7 @@ def _(anywidget, traitlets):
         .fc-wrap { font: 13px system-ui, -apple-system, sans-serif; }
         .fc-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
         .fc-day { font-size: 15px; color: #666; }
-        .fc-day b { font-size: 26px; color: #dd6b20; font-variant-numeric: tabular-nums; }
+        .fc-day b { font-family: "IBM Plex Mono", monospace; font-size: 26px; color: #dd6b20; font-variant-numeric: tabular-nums; }
         .fc-topic { color: #888; font-size: 12px; }
         .fc-readout { font-size: 13px; color: #666; }
         .fc-readout b { font-size: 18px; color: #dd6b20; font-variant-numeric: tabular-nums; }
@@ -3595,7 +3608,7 @@ def _(anywidget, traitlets):
                        width="${big ? 4 : 3}" height="10" rx="1.5" style="animation-delay:${i * 0.12}s"></rect>`
               ).join("") +
               (big ? `<text class="cs-name" x="${-w / 2 + 52}" y="-4">${csa.split("/")[0]}</text>
-                      <text class="cs-sub" x="${-w / 2 + 52}" y="10">311 &middot; connected</text>` : "");
+                      <text class="cs-sub" x="${-w / 2 + 52}" y="10">calling 311</text>` : "");
             gC.appendChild(g); return g;
           };
 
@@ -3986,11 +3999,11 @@ def _(anywidget, traitlets):
 
         .cs-hud { position: absolute; top: 14px; left: 18px; right: 18px; z-index: 3; display: flex;
                   align-items: baseline; gap: 12px; pointer-events: none; }
-        .cs-phase { font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: #8b98a8; }
+        .cs-phase { font-family: Newsreader, Georgia, serif; font-size: 17px; font-style: italic; color: #93a2b3; }
         .cs-clock { margin-left: auto; display: flex; align-items: baseline; gap: 8px; opacity: 0; transition: opacity 400ms; }
         .cs-dayw.cs-on { opacity: 1; }
         .cs-clock:has(.cs-on) { opacity: 1; }
-        .cs-day { font-size: 40px; color: #f6ad55; font-variant-numeric: tabular-nums;
+        .cs-day { font-family: "IBM Plex Mono", monospace; font-size: 40px; color: #f6ad55; font-variant-numeric: tabular-nums;
                   text-shadow: 0 0 22px rgba(246,173,85,0.45); }
         .cs-dayw { color: #8b98a8; }
         .cs-speed { font-size: 11px; color: #71809000; }
@@ -4000,18 +4013,17 @@ def _(anywidget, traitlets):
 
         .cs-board { position: absolute; right: 16px; bottom: 74px; width: 176px; pointer-events: none;
                     font-size: 11px; color: #8b98a8; z-index: 2; }
-        .cs-bh { text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; margin-bottom: 3px; }
+        .cs-bh { font-family: Newsreader, Georgia, serif; font-style: italic; font-size: 12px; margin-bottom: 5px; }
         .cs-br { display: flex; justify-content: space-between; padding: 1px 0; }
         .cs-br b { color: #f6ad55; font-variant-numeric: tabular-nums; }
 
-        .cs-ev { position: absolute; left: 50%; top: 48%; transform: translate(-50%,-50%) scale(0.97);
-                 z-index: 4; min-width: 330px; padding: 16px 20px; border-radius: 12px;
-                 background: rgba(8,12,18,0.92); border: 1px solid rgba(255,255,255,0.14);
-                 box-shadow: 0 18px 60px rgba(0,0,0,0.6); opacity: 0; pointer-events: none;
-                 transition: opacity 400ms ease, transform 400ms cubic-bezier(.2,1.3,.4,1); }
-        .cs-ev.cs-on { opacity: 1; transform: translate(-50%,-50%) scale(1); }
-        .cs-ev-h { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
-                   color: #8b98a8; margin-bottom: 10px; }
+        .cs-ev { position: absolute; left: 50%; top: 48%; transform: translate(-50%,-50%);
+                 z-index: 4; min-width: 340px; padding: 18px 22px; opacity: 0; pointer-events: none;
+                 background: rgba(6,10,14,0.94); border-left: 2px solid #9a7b1f;
+                 transition: opacity 380ms ease; }
+        .cs-ev.cs-on { opacity: 1; }
+        .cs-ev-h { font-family: Newsreader, Georgia, serif; font-size: 14px; font-style: italic;
+                   color: #93a2b3; margin-bottom: 12px; }
         .cs-ev-r { display: flex; justify-content: space-between; gap: 24px; padding: 3px 0;
                    font-size: 12px; color: #9aa7b6; opacity: 0; animation: cs-rowin 260ms ease forwards; }
         .cs-ev-r b { color: #e9eef5; font-weight: 600; }
@@ -4035,11 +4047,11 @@ def _(anywidget, traitlets):
         .cs-bar-done { display: block; height: 100%; width: 0; border-radius: 2px;
                        background: #2d9e60; transition: width 160ms linear; }
 
-        .cs-end { position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%) scale(0.96);
-                  z-index: 4; text-align: center; padding: 20px 28px; border-radius: 12px;
-                  background: rgba(8,12,18,0.88); border: 1px solid rgba(255,255,255,0.14);
-                  box-shadow: 0 18px 60px rgba(0,0,0,0.6); opacity: 0; pointer-events: none;
-                  transition: opacity 500ms ease, transform 500ms cubic-bezier(.2,1.3,.4,1); }
+        .cs-end { position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%) scale(0.98);
+                  z-index: 4; text-align: center; padding: 26px 34px; opacity: 0; pointer-events: none;
+                  background: rgba(6,10,14,0.9); border-top: 2px solid #b83227;
+                  border-bottom: 1px solid rgba(255,255,255,0.12);
+                  transition: opacity 500ms ease, transform 500ms cubic-bezier(.2,1.2,.4,1); }
         .cs-end.cs-on { opacity: 1; transform: translate(-50%, -50%) scale(1); }
         .cs-end-n { font-size: 15px; color: #cfd8e3; }
         .cs-end-n b { font-size: 34px; color: #2fbe74; font-variant-numeric: tabular-nums; }

@@ -1,69 +1,215 @@
-/* Baltimore Triage: app look. Loaded by marimo via App(css_file="app.css"). */
+/* Baltimore Triage. Loaded by marimo via App(css_file="app.css").
+ *
+ * The rule the whole look hangs on: the interface is greyscale, and saturated colour only ever
+ * means data. There is no brand accent. The one exception is a municipal gold, used nowhere except
+ * the deadline the city set itself, because that promise is the other character in the story.
+ *
+ * Three voices. Newsreader carries the argument, the system sans carries the explanation, and
+ * IBM Plex Mono appears only where the source material is genuinely fixed-width: request codes,
+ * dates, day counts, anything in a column that has to line up.
+ */
 
-/* Hero header */
-.hero {
-  padding: 28px 28px 22px;
-  border-radius: 14px;
-  color: #fff;
-  background: linear-gradient(135deg, #1a2433 0%, #22324a 55%, #2b6cb0 100%);
-}
-.hero h1 {
-  margin: 4px 0 10px;
-  font-size: 2.2rem;
-  line-height: 1.15;
-  letter-spacing: -0.02em;
-  color: #fff;
-}
-.hero-eyebrow {
-  margin: 0;
-  font-size: 0.78rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #f6ad55;
-}
-.hero-lede {
-  margin: 0;
-  max-width: 44rem;
-  font-size: 1.08rem;
-  line-height: 1.5;
-  color: rgba(255, 255, 255, 0.88);
-}
-.hero-lede em {
-  color: #fbd38d;
-  font-style: normal;
-  font-weight: 600;
+@import url("https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
+
+:root {
+  --ink: #0b1116;
+  --ink-2: #131c24;
+  --slate-800: #1f2b36;
+  --slate-600: #44586a;
+  --slate-400: #7d8fa0;
+  --slate-200: #c3ced8;
+  --rule: rgba(11, 17, 22, 0.14);
+
+  /* Only ever the city's own deadline. Never decoration. */
+  --promise: #9a7b1f;
+
+  /* Data. Nothing else in the interface may use these. */
+  --answered: #1a844e;
+  --partial: #c8912f;
+  --waiting: #b83227;
+
+  --serif: "Newsreader", Iowan Old Style, Charter, Georgia, serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-/* Section headings: a thin accent rule so the long story is easy to scan */
+/* ---- the opening record ------------------------------------------------------------------
+ * A real request, still open, rendered as the municipal object it is. The hero is not a claim
+ * about the city; it is one of the city's own records, printed.
+ */
+.slip {
+  border: 1px solid var(--rule);
+  border-top: 3px solid var(--waiting);
+  background: #fff;
+  padding: 26px 30px 22px;
+  max-width: 62rem;
+}
+.slip-kicker {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--slate-400);
+  margin: 0 0 18px;
+}
+.slip h1 {
+  font-family: var(--serif);
+  font-size: clamp(2rem, 4.2vw, 3.1rem);
+  font-weight: 500;
+  line-height: 1.08;
+  letter-spacing: -0.016em;
+  margin: 0 0 14px;
+  color: var(--ink);
+  max-width: 20ch;
+}
+.slip-lede {
+  font-size: 1.06rem;
+  line-height: 1.6;
+  color: var(--slate-600);
+  max-width: 54ch;
+  margin: 0 0 24px;
+}
+.slip-record {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid var(--rule);
+}
+@media (max-width: 40rem) {
+  .slip-record {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.slip-field {
+  padding: 14px 22px 12px 0;
+  min-width: 0;
+}
+.slip-field dt {
+  font-size: 0.7rem;
+  color: var(--slate-400);
+  margin: 0 0 5px;
+}
+.slip-field dd {
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+  color: var(--ink);
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.slip-field.is-promise dd {
+  color: var(--promise);
+}
+.slip-field.is-late dd {
+  color: var(--waiting);
+}
+
+/* ---- the argument ------------------------------------------------------------------------ */
 .markdown h2 {
-  margin-top: 1.6rem;
-  padding-top: 0.9rem;
-  border-top: 3px solid #dd6b20;
-  letter-spacing: -0.01em;
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.9rem;
+  letter-spacing: -0.015em;
+  margin-top: 3.2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
 }
 .markdown h3 {
-  letter-spacing: -0.005em;
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: 1.32rem;
+  letter-spacing: -0.01em;
+  margin-top: 2.1rem;
+}
+.markdown p {
+  max-width: 66ch;
+  line-height: 1.62;
+}
+.markdown strong {
+  font-weight: 600;
+  color: var(--ink);
 }
 
-/* Sidebar section links */
+/* Figures for anything countable, so columns of numbers do not wobble. */
+.markdown b,
+.markdown strong {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- the dispatch board -------------------------------------------------------------------
+ * The one section that is an instrument rather than an article. Fixed-width because the records
+ * genuinely are: request codes, dates, day counts. Dark because it is the only part of the piece
+ * that is not addressed to a reader.
+ */
+.board {
+  background: var(--ink);
+  color: var(--slate-200);
+  padding: 22px 24px 18px;
+  border-left: 3px solid var(--promise);
+}
+.board-line {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--slate-400);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 22px;
+  margin-bottom: 16px;
+}
+.board-line b {
+  color: var(--slate-200);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.board h3 {
+  font-family: var(--serif);
+  font-size: 1.5rem;
+  font-weight: 500;
+  color: #fff;
+  margin: 0 0 8px;
+}
+.board p {
+  color: var(--slate-200);
+  max-width: 62ch;
+  line-height: 1.6;
+  font-size: 0.95rem;
+}
+.board strong {
+  color: #fff;
+}
+
+/* ---- sidebar ------------------------------------------------------------------------------ */
 .side-nav {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 .side-nav a {
-  padding: 5px 10px;
-  border-radius: 6px;
-  color: inherit;
+  padding: 6px 10px;
+  color: var(--slate-600);
   text-decoration: none;
-  font-size: 0.92rem;
+  font-size: 0.88rem;
+  border-left: 2px solid transparent;
+  transition: border-color 160ms ease, color 160ms ease;
 }
-.side-nav a:hover {
-  background: rgba(221, 107, 32, 0.14);
-  color: #dd6b20;
+.side-nav a:hover,
+.side-nav a:focus-visible {
+  border-left-color: var(--ink);
+  color: var(--ink);
 }
 
-/* Jump links land a little below the top edge */
-h1[id], h2[id], h3[id] {
-  scroll-margin-top: 16px;
+h1[id],
+h2[id],
+h3[id] {
+  scroll-margin-top: 20px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
