@@ -2,7 +2,7 @@
 
 **Where is Baltimore bad, and the city not responding?** A [marimo](https://marimo.io) notebook that doubles as a web app. It scores all 55 Community Statistical Areas on need vs service across 10 topics, then zooms from the whole city down to the street address of every still-open request.
 
-**Live site:** [https://xpw1337.github.io/HopHacks26/](https://xpw1337.github.io/HopHacks26/)
+**Live site:** [https://bemorebaltimore.biz/](https://bemorebaltimore.biz/)
 
 HopHacks 2026 · marimo Data Visualization track. Source: [github.com/xpw1337/HopHacks26](https://github.com/xpw1337/HopHacks26).
 
