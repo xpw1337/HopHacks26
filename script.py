@@ -520,12 +520,22 @@ def _(
 
 
 @app.cell
-def _(mo):
+def _(STORM_ORIGIN, mo):
     mo.md(
-        r"""
+        rf"""
     ### The unison call
 
-    How long it takes for each neighborhood to respond to a complaint &mdash; visualized
+    A resident reports a broken streetlight. Then the same report, filed from all 55 neighborhoods
+    at the same second, and the city answering each one at the rate the model predicts.
+
+    Those 55 calls did not happen &mdash; that is the point. It is the experiment nobody can run:
+    you cannot file one complaint everywhere at once and watch who gets served. Holding the problem,
+    the agency and the deadline fixed leaves the address as the only thing that varies.
+
+    An area turns green once **three in four** of its reports are closed. That is the bar because no
+    neighborhood here ever reaches zero: the best still has 7% of its streetlight reports open six
+    months later, and the worst has 38%. Press play, and watch **{STORM_ORIGIN.split("/")[0]}**,
+    where the call came from.
     """
     )
     return
