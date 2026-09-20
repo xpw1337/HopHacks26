@@ -367,8 +367,12 @@ def _(STORM_ORIGIN, STORM_TOPIC, mo):
 
     Those 55 calls did not happen &mdash; that is the point. The model was trained to answer exactly
     this question, so the map below is its answer to a thought experiment: *file one identical
-    {STORM_TOPIC.lower()} request everywhere, and watch who gets an answer.* Press play, and keep an
-    eye on **{STORM_ORIGIN.split("/")[0]}**, where the call came from.
+    {STORM_TOPIC.lower()} request everywhere, and watch who gets an answer.*
+
+    An area turns green once **three in four** of its reports are closed. That is the bar because no
+    neighborhood ever reaches zero here: the best still has 7% of its streetlight reports open six
+    months later, and the worst has 38%. Press play, and keep an eye on
+    **{STORM_ORIGIN.split("/")[0]}**, where the call came from.
     """
     )
     return
@@ -898,8 +902,16 @@ def _():
     # still glowing at the end: the story closes on the person it started with.
     STORM_ORIGIN = "Westport/Mount Winans/Lakeland"
     STORM_TOPIC = "Streetlights"
-    STORM_PREMISE = "Hi, my name is Denise. I'm calling from Westport, down off Annapolis Road."
-    STORM_ISSUE = "The streetlights on my block have been out for three weeks."
+    # Kept identical to scripts/make_call_demo.py, because these are the captions for those clips.
+    STORM_PREMISE = (
+        "Hi... yeah, hi. My name's Denise. I'm over in Westport, just off Annapolis Road. "
+        "I've called about this before, honestly."
+    )
+    STORM_ISSUE = "The streetlights on my block have been out. Three weeks now."
+    # An area counts as answered when three in four of its reports are closed. Half is too generous
+    # to mean anything here -- every area passes it inside three weeks -- and no area in this topic
+    # ever reaches zero, so demanding all of them would paint the whole city as failing forever.
+    STORM_ANSWERED = 0.25
 
     # Colors: blue = over-served, orange = under-served (colorblind-safe pair).
     OVER, MID, UNDER = "#2b6cb0", "#f1f1f1", "#dd6b20"
@@ -920,6 +932,7 @@ def _():
         MIN_REQUESTS,
         OVER,
         ROBUST_SHARE,
+        STORM_ANSWERED,
         STORM_ISSUE,
         STORM_ORIGIN,
         STORM_PREMISE,
@@ -1913,7 +1926,18 @@ def _(
         .group_by("domain").agg(pl.col("d").median().alias("naive_median_days"))
     )
     fix_topics = fix_topics.join(_naive, on="domain", how="left")
-    return fix_clock, fix_model, fix_summary, fix_topics
+
+    # The typical request of each kind in each area, so the sequence can show what the model was
+    # handed before it answers.
+    fix_inputs = _r.group_by("domain", "csa").agg(
+        pl.col("agency").mode().first().alias("agency"),
+        pl.col("method").mode().first().alias("method"),
+        pl.col("sla_days").median().alias("sla_days"),
+        pl.col("reports_per_1k").first().alias("reports_per_1k"),
+        pl.col("vacancy").first().alias("vacancy"),
+        pl.len().alias("n"),
+    )
+    return fix_clock, fix_inputs, fix_model, fix_summary, fix_topics
 
 
 @app.cell
@@ -2335,7 +2359,14 @@ def _(anywidget, traitlets):
         """
 
         _esm = r"""
-        const UNDER = [221, 107, 32];
+        const RAMP = [[26, 132, 78], [226, 168, 62], [196, 52, 42]];
+        const mixc = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+        const BAR = 0.25;                      // green means three in four reports closed
+        const shade = (s) => {
+          const t = Math.max(0, Math.min(1, s));
+          if (t <= BAR) return `rgb(${mixc(RAMP[0], RAMP[1], t / BAR).join(",")})`;
+          return `rgb(${mixc(RAMP[1], RAMP[2], (t - BAR) / (1 - BAR)).join(",")})`;
+        };
 
         function render({ model, el }) {
           const [W, H] = model.get("size");
@@ -2361,7 +2392,7 @@ def _(anywidget, traitlets):
                 </select>
               </div>
               <div class="fc-legend">
-                <span>all fixed</span><span class="fc-grad"></span><span>all still open</span>
+                <span>3 in 4 closed</span><span class="fc-grad"></span><span>none closed</span>
                 <span class="fc-hint">hover an area</span>
               </div>
             </div>`;
@@ -2399,7 +2430,7 @@ def _(anywidget, traitlets):
             for (const [csa, p] of Object.entries(paths)) {
               const s = sAt(csa, t);
               if (s === null) { p.setAttribute("fill", "rgba(150,150,150,0.12)"); continue; }
-              p.setAttribute("fill", `rgba(${UNDER.join(",")},${(0.06 + 0.94 * s).toFixed(3)})`);
+              p.setAttribute("fill", shade(s));
               const n = (model.get("labels")[csa] || {}).n || 0;
               num += s * n; den += n;
             }
@@ -2477,7 +2508,7 @@ def _(anywidget, traitlets):
                     background: transparent; color: inherit; font-size: 12px; }
         .fc-legend { display: flex; align-items: center; gap: 6px; margin-top: 6px; color: #888; font-size: 11px; }
         .fc-grad { width: 90px; height: 9px; border-radius: 2px;
-                   background: linear-gradient(90deg, rgba(221,107,32,0.06), rgb(221,107,32)); }
+                   background: linear-gradient(90deg, rgb(45,158,96), rgb(226,168,62), rgb(200,56,44)); }
         .fc-hint { margin-left: auto; }
         """
 
@@ -2545,8 +2576,18 @@ def _(anywidget, traitlets):
           ring(when) { this.tone(440, when, 1.1, 0.04); this.tone(480, when, 1.1, 0.04); },
         };
 
-        const RED = [221, 107, 32];
-        const rgba = (a) => `rgba(${RED[0]},${RED[1]},${RED[2]},${a.toFixed(3)})`;
+        // Green is not "some progress", it is "this area cleared the bar": three in four reports
+        // closed. Below the bar the greens deepen; above it the ramp runs amber to red by how far
+        // short it fell. The step at the bar is deliberate -- crossing it is the event worth seeing,
+        // and a smooth ramp let areas sitting on a sixth of their reports still look answered.
+        const DEEP = [26, 132, 78], MINT = [138, 196, 116];
+        const AMBER = [226, 168, 62], RED = [196, 52, 42];
+        const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+        const shade = (s, bar) => {
+          const t = Math.max(0, Math.min(1, s));
+          if (t <= bar) return `rgb(${mix(DEEP, MINT, bar ? t / bar : 0).join(",")})`;
+          return `rgb(${mix(AMBER, RED, Math.min(1, (t - bar) / (1 - bar))).join(",")})`;
+        };
 
         function render({ model, el }) {
           const [W, H] = model.get("size");
@@ -2556,16 +2597,21 @@ def _(anywidget, traitlets):
             <div class="cs-wrap">
               <div class="cs-stage">
                 <svg class="cs-map" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
-                  <g class="cs-areas"></g><g class="cs-threads"></g>
+                  <g class="cs-areas"></g><g class="cs-rings"></g>
                   <g class="cs-cards"></g><g class="cs-stamps"></g>
                 </svg>
                 <div class="cs-hud">
                   <div class="cs-phase"></div>
-                  <div class="cs-clock"><span class="cs-dayw">Day <b class="cs-day">0</b></span>
+                  <div class="cs-clock"><span class="cs-dayw">Predicted day <b class="cs-day">0</b></span>
                     <span class="cs-speed"></span></div>
                   <div class="cs-count"></div>
+                <div class="cs-mark"></div>
+                <div class="cs-me"></div>
                 </div>
                 <div class="cs-board"></div>
+                <div class="cs-bar"><i class="cs-bar-done"></i></div>
+                <div class="cs-ev"></div>
+                <div class="cs-end"></div>
                 <div class="cs-cap"></div>
               </div>
               <div class="cs-ctrl">
@@ -2576,15 +2622,18 @@ def _(anywidget, traitlets):
             </div>`;
 
           const $ = (c) => el.querySelector(c);
-          const gA = $(".cs-areas"), gT = $(".cs-threads"), gC = $(".cs-cards"), gS = $(".cs-stamps");
+          const gA = $(".cs-areas"), gR = $(".cs-rings"), gC = $(".cs-cards"), gS = $(".cs-stamps");
           const elPhase = $(".cs-phase"), elDay = $(".cs-day"), elDayW = $(".cs-dayw");
           const elSpeed = $(".cs-speed"), elCount = $(".cs-count"), elCap = $(".cs-cap");
           const elBoard = $(".cs-board"), btn = $(".cs-play"), skip = $(".cs-skip"), note = $(".cs-note");
+          const elBar = $(".cs-bar"), elBarDone = $(".cs-bar-done"), elEnd = $(".cs-end");
+          const elEv = $(".cs-ev"), elMark = $(".cs-mark"), elMe = $(".cs-me");
 
           const cur = () => model.get("curves") || {};
           const lab = () => model.get("labels") || {};
           const cen = () => model.get("centroids") || {};
           const hz = () => model.get("horizon") || 180;
+          const barOf = () => model.get("answered") || 0.25;
           const sAt = (csa, d) => { const c = cur()[csa]; return c ? c[Math.min(Math.round(d), c.length - 1)] / 100 : null; };
 
           // --- build the map once -------------------------------------------------
@@ -2595,11 +2644,25 @@ def _(anywidget, traitlets):
             gA.appendChild(p); paths[sh.csa] = p;
           }
 
+          // Cards are drawn in map units, so they must be counter-scaled as the camera moves or they
+          // balloon when it pushes in. place() is the single place that owns a card's transform.
+          let camScale = 1;
+          const place = (csa, g, grown) => {
+            const c = cen()[csa]; if (!c) return;
+            const k = (grown ? 1 : 0.01) * camScale;
+            g.setAttribute("transform", `translate(${c[0]},${c[1]}) scale(${k})`);
+          };
+          const rescale = () => {
+            for (const [csa, g] of Object.entries(cards)) {
+              place(csa === "__origin" ? model.get("origin") : csa, g, g.classList.contains("cs-in"));
+            }
+          };
+
           const mkCard = (csa, big) => {
             const c = cen()[csa]; if (!c) return null;
             const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
             g.setAttribute("class", "cs-card" + (big ? " cs-big" : ""));
-            g.setAttribute("transform", `translate(${c[0]},${c[1]}) scale(0.01)`);
+            g.setAttribute("transform", `translate(${c[0]},${c[1]}) scale(${0.01 * camScale})`);
             const w = big ? 150 : 46, h = big ? 54 : 26;
             g.innerHTML =
               `<rect x="${-w / 2}" y="${-h / 2}" width="${w}" height="${h}" rx="${big ? 8 : 6}"></rect>` +
@@ -2614,6 +2677,7 @@ def _(anywidget, traitlets):
 
           // --- state --------------------------------------------------------------
           let raf = null, t0 = 0, fired = new Set(), phase = "idle", cdAt = null, running = false;
+          let markSet = new Set();
           let cleared = [], stampSet = new Set(), timers = [];
           const CD_A = 12000, CD_DAY_A = 30, CD_B = 9000;   // warped: slow to day 30, then run
           const dayAt = (e) => e <= CD_A
@@ -2623,41 +2687,70 @@ def _(anywidget, traitlets):
 
           const clearDay = (csa) => { const l = lab()[csa] || {}; return l.clear === undefined ? null : l.clear; };
 
+          // Day zero means nothing has been answered yet, so the city starts wholly red. Anything
+          // without a curve stays a neutral grey rather than claiming to be either.
+          const fillsAt = (d) => {
+            for (const [csa, p] of Object.entries(paths)) {
+              const s = sAt(csa, d);
+              p.setAttribute("fill", s === null ? "rgba(255,255,255,0.10)" : shade(s, barOf()));
+            }
+          };
+
           const paintDay = (d) => {
             elDay.textContent = Math.round(d);
             let open = 0, tot = 0;
             for (const [csa, p] of Object.entries(paths)) {
               const s = sAt(csa, d);
-              if (s === null) { p.setAttribute("fill", "rgba(150,150,150,0.10)"); continue; }
-              p.setAttribute("fill", rgba(0.05 + 0.95 * s));
+              if (s === null) { p.setAttribute("fill", "rgba(255,255,255,0.10)"); continue; }
+              p.setAttribute("fill", shade(s, barOf()));
+              // The longer an area sits unanswered while its neighbours resolve, the angrier its
+              // outline gets. The fill still carries the number; this only draws the eye to it.
+              const rot = s > 0.5 ? Math.min(1, (d / hz()) * 1.6 * s) : 0;
+              if (rot > 0.04) {
+                p.style.stroke = `rgba(255,86,70,${(0.3 + 0.7 * rot).toFixed(2)})`;
+                p.style.strokeWidth = (0.7 + 2.3 * rot).toFixed(2);
+              } else if (p.style.stroke) {
+                p.style.stroke = ""; p.style.strokeWidth = "";
+              }
               const n = (lab()[csa] || {}).n || 0; open += s * n; tot += n;
               const cd = clearDay(csa);
               if (cd !== null && d >= cd && !stampSet.has(csa)) {
-                stampSet.add(csa); cleared.push(csa); stamp(csa, cd);
+                stampSet.add(csa); cleared.push(csa);
+                const _cc = cen()[csa];
+                if (_cc) ring(_cc[0], _cc[1], 70, 700, "cs-done");
                 // pitched by finish order: the city plays a falling melody as neglect deepens
                 audio.tone(880 * Math.pow(0.945, cleared.length), 0, 0.42, 0.06, "triangle");
                 p.classList.add("cs-pop"); setTimeout(() => p.classList.remove("cs-pop"), 420);
               }
             }
+            // Days are abstract. "Three months" is not.
+            const MARKS = [[7, "one week"], [30, "one month"], [90, "three months"], [180, "six months"]];
+            for (const [dd, text] of MARKS) {
+              if (d >= dd && !markSet.has(dd)) {
+                markSet.add(dd);
+                elMark.textContent = text;
+                elMark.classList.remove("cs-flash");
+                void elMark.offsetWidth;
+                elMark.classList.add("cs-flash");
+              }
+            }
+            const og = model.get("origin"), os = sAt(og, d);
+            if (os !== null) {
+              elMe.innerHTML = `${og.split("/")[0]} &mdash; <b>${Math.round(100 * os)}%</b> still open`;
+            }
             const tot2 = Object.keys(cur()).length;
-            elCount.innerHTML = `<b>${cleared.length}</b> of ${tot2} neighborhoods answered`;
+            elCount.innerHTML = `<b>${cleared.length}</b> of ${tot2} past three in four`;
+            elBar.classList.add("cs-on");
+            elBarDone.style.width = `${(100 * cleared.length) / Math.max(tot2, 1)}%`;
             elSpeed.textContent = `${Math.round(speedAt(cdAt === null ? 0 : performance.now() - cdAt))} days/sec`;
             drawBoard(d);
-          };
-
-          const stamp = (csa, day) => {
-            const c = cen()[csa]; if (!c) return;
-            const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
-            t.setAttribute("class", "cs-stamp"); t.setAttribute("x", c[0]); t.setAttribute("y", c[1]);
-            t.textContent = day === null ? "—" : "d" + day;
-            gS.appendChild(t);
           };
 
           const drawBoard = (d) => {
             const rows = Object.keys(cur()).map((csa) => ({ csa, s: sAt(csa, d), cd: clearDay(csa) }));
             rows.sort((a, b) => b.s - a.s);
             const top = rows.slice(0, 6);
-            elBoard.innerHTML = `<div class="cs-bh">still waiting</div>` + top.map((r) =>
+            elBoard.innerHTML = `<div class="cs-bh">longest still waiting</div>` + top.map((r) =>
               `<div class="cs-br"><span>${r.csa.split("/")[0]}</span><b>${Math.round(100 * r.s)}%</b></div>`
             ).join("");
           };
@@ -2673,37 +2766,136 @@ def _(anywidget, traitlets):
             timers.push(id);
           };
 
+          const issueClips = () =>
+            Object.keys(model.get("clips") || {}).filter((k) => k.startsWith("issue_")).sort();
+
+          const ring = (x, y, r1, ms, cls) => {
+            const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+            c.setAttribute("class", "cs-ring " + (cls || ""));
+            c.setAttribute("cx", x); c.setAttribute("cy", y); c.setAttribute("r", 1);
+            gR.appendChild(c);
+            requestAnimationFrame(() => {
+              c.style.transition = `r ${ms}ms linear, opacity ${ms}ms ease-out`;
+              c.setAttribute("r", r1); c.style.opacity = "0";
+            });
+            const id = setTimeout(() => c.remove(), ms + 120);
+            timers.push(id);
+          };
+
+          const mapSpan = () => Math.hypot(W, H);
+
+          const svg = $(".cs-map");
+          const FULL = [0, 0, W, H];
+          let view = FULL.slice(), camAnim = null;
+
+          const applyView = () => {
+            svg.setAttribute("viewBox", view.map((v) => v.toFixed(1)).join(" "));
+            camScale = view[2] / W;
+            rescale();
+          };
+
+          const camera = (target, ms) => {
+            const from = view.slice(), t0 = performance.now();
+            cancelAnimationFrame(camAnim);
+            const step = (now) => {
+              const t = Math.min(1, (now - t0) / ms);
+              const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;   // easeInOutQuad
+              view = from.map((v, i) => v + (target[i] - v) * e);
+              applyView();
+              if (t < 1) camAnim = requestAnimationFrame(step);
+            };
+            camAnim = requestAnimationFrame(step);
+          };
+
+          const boxOf = (csa) => (model.get("shapes").find((x) => x.csa === csa) || {}).box;
+
+          const camTo = (csa, pad, ms) => {
+            const b = boxOf(csa); if (!b) { camera(FULL, ms); return; }
+            const [x, y, w, h] = b;
+            let tw = w * pad, th = h * pad;
+            if (tw / th > W / H) th = (tw * H) / W; else tw = (th * W) / H;
+            camera([x + w / 2 - tw / 2, y + h / 2 - th / 2, tw, th], ms);
+          };
+
+          // The ripple only has to read as "it is spreading". Voicing all 52 at once was a smear,
+          // so a handful speak here and the whole city speaks together on the unison beat.
+          const RIPPLE = 1250;
+
           const bloom = () => {
-            const order = model.get("bloom") || {};
-            const clips = Object.keys(model.get("clips") || {}).filter((k) => k.startsWith("issue"));
-            let i = 0;
-            for (const [csa, frac] of Object.entries(order)) {
-              if (csa === model.get("origin")) continue;
-              const delay = 60 + frac * 2200;                     // ripple across real geography
-              const g = mkCard(csa, false); if (!g) continue;
+            const order = Object.entries(model.get("bloom") || {})
+              .filter(([csa]) => csa !== model.get("origin"))
+              .sort((a, b) => a[1] - b[1]);
+            const clips = issueClips();
+            const voiceEvery = Math.max(1, Math.floor(order.length / 6));
+            const o = cen()[model.get("origin")];
+            // One wave leaving her block. Each area answers as the front reaches it, so the spread
+            // is something you watch travel rather than a diagram of lines.
+            if (o) ring(o[0], o[1], mapSpan(), RIPPLE, "cs-front");
+            order.forEach(([csa, frac], n) => {
+              const delay = 40 + frac * RIPPLE;
+              const g = mkCard(csa, false); if (!g) return;
               cards[csa] = g;
               const id = setTimeout(() => {
-                g.classList.add("cs-in");
-                const c = cen()[csa], o = cen()[model.get("origin")];
-                if (o) {
-                  const ln = document.createElementNS("http://www.w3.org/2000/svg", "line");
-                  ln.setAttribute("class", "cs-thread");
-                  ln.setAttribute("x1", o[0]); ln.setAttribute("y1", o[1]);
-                  ln.setAttribute("x2", c[0]); ln.setAttribute("y2", c[1]);
-                  gT.appendChild(ln); setTimeout(() => ln.classList.add("cs-fade"), 500);
+                g.classList.add("cs-in"); place(csa, g, true);
+                const c = cen()[csa];
+                if (c) ring(c[0], c[1], 55, 620, "cs-echo");
+                if (paths[csa]) {
+                  paths[csa].classList.add("cs-hit");
+                  setTimeout(() => paths[csa].classList.remove("cs-hit"), 520);
                 }
-                if (clips.length) audio.play(clips[i % clips.length], 0, 0.5);
-                i++;
+                if (clips.length && n % voiceEvery === 0) {
+                  audio.play(clips[(n / voiceEvery) % clips.length | 0], 0, 0.22);
+                }
               }, delay);
               timers.push(id);
+            });
+          };
+
+          // Every voice at once, a few milliseconds apart so it thickens instead of phasing.
+          // Show the inputs before the answer. Without this the countdown reads as a recording of
+          // what already happened rather than a forecast for a request nobody has filed yet.
+          const evidence = () => {
+            const e = model.get("evidence") || {};
+            const rows = e.rows || [];
+            elEv.innerHTML =
+              `<div class="cs-ev-h">what the model is given</div>`
+              + rows.map(([k, v], i) =>
+                  `<div class="cs-ev-r" style="animation-delay:${i * 130}ms">
+                     <span>${k}</span><b>${v}</b></div>`).join("")
+              + `<div class="cs-ev-f">gradient-boosted hazard model &middot; trained on
+                   ${e.trained || "?"} request-intervals &middot; tested on ${e.tested || "?"}
+                   it never saw</div>`;
+            elEv.classList.add("cs-on");
+            const id = setTimeout(() => elEv.classList.remove("cs-on"), 3600);
+            timers.push(id);
+          };
+
+          const unison = () => {
+            const clips = issueClips();
+            audio.play("sfx_burst", 0, 0.7);
+            clips.forEach((k, i) => audio.play(k, i * 0.012, 0.95));
+            // A ring out of every neighborhood on the same frame. Simultaneity is the whole point,
+            // so nothing here is staggered.
+            for (const [csa, c] of Object.entries(cen())) {
+              if (!paths[csa]) continue;
+              ring(c[0], c[1], 130, 900, "cs-burst");
             }
+            for (const g of Object.values(cards)) g.classList.add("cs-shout");
+            for (const p of Object.values(paths)) p.classList.add("cs-shout-a");
+            setTimeout(() => {
+              for (const g of Object.values(cards)) g.classList.remove("cs-shout");
+              for (const p of Object.values(paths)) p.classList.remove("cs-shout-a");
+            }, 900);
           };
 
           const collapse = () => {
-            for (const g of Object.values(cards)) g.classList.add("cs-out");
-            const og = cards.__origin; if (og) og.classList.add("cs-out");
-            gT.innerHTML = "";
+            for (const [csa, g] of Object.entries(cards)) {
+              g.classList.add("cs-out");
+              place(csa === "__origin" ? model.get("origin") : csa, g, false);
+            }
+            gR.innerHTML = "";
             for (const p of Object.values(paths)) p.classList.add("cs-lit");
+            fillsAt(0);
             elDayW.classList.add("cs-on");
           };
 
@@ -2713,14 +2905,28 @@ def _(anywidget, traitlets):
             else if (c.kind === "ring") {
               const p = paths[model.get("origin")];
               if (p) { p.classList.add("cs-origin"); }
-              audio.ring(0);
+              const _o = cen()[model.get("origin")];
+              if (_o) ring(_o[0], _o[1], 110, 1200, "cs-echo");
+              if (BUF["sfx_ring"]) audio.play("sfx_ring", 0, 0.85); else audio.ring(0);
             } else if (c.kind === "origin_card") {
               const g = mkCard(model.get("origin"), true);
-              if (g) { cards.__origin = g; requestAnimationFrame(() => g.classList.add("cs-in")); }
+              if (g) {
+                cards.__origin = g;
+                requestAnimationFrame(() => { g.classList.add("cs-in"); place(model.get("origin"), g, true); });
+              }
             } else if (c.kind === "audio") audio.play(c.clip, 0, c.gain === undefined ? 1 : c.gain);
+            else if (c.kind === "camera") {
+              if (c.to === "full") camera(FULL, c.ms || 1600);
+              else camTo(model.get("origin"), c.pad || 4.2, c.ms || 1400);
+            }
             else if (c.kind === "bloom") bloom();
+            else if (c.kind === "evidence") evidence();
+            else if (c.kind === "unison") unison();
             else if (c.kind === "collapse") collapse();
-            else if (c.kind === "countdown") { phase = "countdown"; cdAt = performance.now(); }
+            else if (c.kind === "countdown") {
+              phase = "countdown"; cdAt = performance.now();
+              audio.play("sfx_bed", 0, 0.5);   // 22s of underscore over a ~21s countdown
+            }
             else if (c.kind === "end") finish();
           };
 
@@ -2729,17 +2935,37 @@ def _(anywidget, traitlets):
             cancelAnimationFrame(raf); raf = null; running = false;
             paintDay(hz());
             btn.textContent = "Replay"; btn.disabled = false;
-            const l = lab();
-            const stuck = Object.keys(cur())
-              .map((csa) => ({ csa, s: sAt(csa, hz()) }))
-              .filter((r) => r.s > 0.15).sort((a, b) => b.s - a.s);
-            for (const r of stuck) if (paths[r.csa]) paths[r.csa].classList.add("cs-stuck");
+
+            const rows = Object.keys(cur()).map((csa) => ({ csa, s: sAt(csa, hz()) }));
+            const stuck = rows.filter((r) => clearDay(r.csa) === null).sort((a, b) => b.s - a.s);
+            const origin = model.get("origin");
+            const me = rows.find((r) => r.csa === origin);
+
+            // Name the ones left waiting, on the map, where the red is. A day number told you when
+            // something finished; this tells you what never did.
+            gS.innerHTML = "";
+            for (const r of stuck.slice(0, 5)) {
+              const c = cen()[r.csa]; if (!c) continue;
+              const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+              t.setAttribute("class", "cs-tag"); t.setAttribute("x", c[0]); t.setAttribute("y", c[1]);
+              t.innerHTML = `${r.csa.split("/")[0]}<tspan x="${c[0]}" dy="15">`
+                + `${Math.round(100 * r.s)}% never answered</tspan>`;
+              gS.appendChild(t);
+              if (paths[r.csa]) paths[r.csa].classList.add("cs-stuck");
+            }
+
             elPhase.textContent = "Six months later";
-            elCap.innerHTML = stuck.length
-              ? `<b>${stuck.length}</b> neighborhoods are still waiting: `
-                + stuck.slice(0, 4).map((r) => `${r.csa.split("/")[0]} <b>${Math.round(100 * r.s)}%</b>`).join(" &middot; ")
-                + `. The call we opened with came from <b>${model.get("origin").split("/")[0]}</b>.`
-              : "Every neighborhood was answered inside six months.";
+            elCap.textContent = "";
+            elEnd.innerHTML = stuck.length
+              ? `<div class="cs-end-n"><b>${rows.length - stuck.length}</b> of ${rows.length} got
+                   three in four reports closed</div>
+                 <div class="cs-end-s"><b>${stuck.length}</b> never did, in ${hz()} days</div>
+                 <div class="cs-end-o">Denise called from ${origin.split("/")[0]}. Six months on,
+                   <b>${Math.round(100 * (me ? me.s : 0))}%</b> of its streetlight reports are
+                   still open &mdash; the worst in the city.</div>`
+              : `<div class="cs-end-n"><b>all ${rows.length}</b> got three in four closed</div>
+                 <div class="cs-end-s">inside ${hz()} days</div>`;
+            elEnd.classList.add("cs-on");
           };
 
           const tick = (now) => {
@@ -2757,16 +2983,22 @@ def _(anywidget, traitlets):
 
           const reset = () => {
             cancelAnimationFrame(raf); raf = null; running = false; phase = "idle";
-            fired = new Set(); cleared = []; stampSet = new Set();
+            fired = new Set(); cleared = []; stampSet = new Set(); markSet = new Set();
+            elEv.innerHTML = ""; elEv.classList.remove("cs-on");
+            elMark.textContent = ""; elMe.textContent = "";
             for (const id of timers) clearTimeout(id), clearInterval(id);
             timers = [];
-            gC.innerHTML = ""; gT.innerHTML = ""; gS.innerHTML = "";
+            gC.innerHTML = ""; gR.innerHTML = ""; gS.innerHTML = "";
+            cancelAnimationFrame(camAnim); view = FULL.slice(); applyView();
             for (const k of Object.keys(cards)) delete cards[k];
             for (const p of Object.values(paths)) p.className.baseVal = "cs-area";
             elPhase.textContent = ""; elCap.textContent = ""; elCount.textContent = "";
             elSpeed.textContent = ""; elBoard.innerHTML = ""; elDay.textContent = "0";
+            elEnd.innerHTML = ""; elEnd.classList.remove("cs-on");
+            elBar.classList.remove("cs-on"); elBarDone.style.width = "0%";
             elDayW.classList.remove("cs-on");
-            for (const [csa, p] of Object.entries(paths)) p.setAttribute("fill", "rgba(150,150,150,0.10)");
+            for (const p of Object.values(paths)) { p.style.stroke = ""; p.style.strokeWidth = ""; }
+            fillsAt(0);
             note.textContent = Object.keys(model.get("clips") || {}).length
               ? "" : "no audio assets found — playing silent";
           };
@@ -2794,13 +3026,17 @@ def _(anywidget, traitlets):
 
         _css = r"""
         .cs-wrap { font: 13px system-ui, -apple-system, sans-serif; }
-        .cs-stage { position: relative; }
-        .cs-map { width: 100%; height: auto; display: block; background: transparent; }
-        .cs-area { stroke: rgba(127,127,127,0.35); stroke-width: 0.6; transition: fill 120ms linear; }
-        .cs-area.cs-lit { stroke: rgba(127,127,127,0.5); }
+        .cs-stage { position: relative; background: #121821; border-radius: 10px; padding: 14px 14px 10px;
+                    overflow: hidden; }
+        .cs-stage::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+                           background: radial-gradient(ellipse at 50% 45%, transparent 68%, rgba(0,0,0,0.30)); }
+        .cs-map { width: 100%; max-height: 460px; height: auto; display: block; background: transparent; }
+        .cs-area { stroke: rgba(255,255,255,0.3); stroke-width: 0.7; transition: fill 120ms linear; }
+        .cs-area.cs-lit { stroke: rgba(255,255,255,0.42); }
+        .cs-area.cs-shout-a { stroke: #f6ad55; stroke-width: 2; }
         .cs-area.cs-origin { stroke: #dd6b20; stroke-width: 3; animation: cs-pulse 1.1s ease-out 3; }
         .cs-area.cs-pop { stroke: #2b6cb0; stroke-width: 3; }
-        .cs-area.cs-stuck { stroke: #dd6b20; stroke-width: 2.2; animation: cs-pulse 2.2s ease-in-out infinite; }
+        .cs-area.cs-stuck { stroke: #ff6b5a; stroke-width: 2.6; animation: cs-pulse 2.2s ease-in-out infinite; }
         @keyframes cs-pulse { 0%,100% { stroke-opacity: 1; } 50% { stroke-opacity: 0.25; } }
 
         .cs-card { opacity: 0; transition: transform 380ms cubic-bezier(.2,1.4,.4,1), opacity 260ms; }
@@ -2812,29 +3048,87 @@ def _(anywidget, traitlets):
         .cs-sub { fill: #a0aec0; font: 9px system-ui; }
         @keyframes cs-wave { from { transform: scaleY(0.35); } to { transform: scaleY(1.5); } }
         .cs-card.cs-out { opacity: 0; transition: transform 520ms ease-in, opacity 520ms; }
-        .cs-thread { stroke: #dd6b20; stroke-width: 0.8; opacity: 0.55; transition: opacity 700ms; }
-        .cs-thread.cs-fade { opacity: 0; }
-        .cs-stamp { fill: #2b6cb0; font: 600 9px system-ui; text-anchor: middle; }
+        .cs-card.cs-shout rect { fill: #dd6b20; stroke: #ffd9b3; stroke-width: 1.6; }
+        .cs-card.cs-shout .cs-bar { fill: #fff; animation-duration: 0.22s; }
+        .cs-ring { fill: none; pointer-events: none; }
+        .cs-ring.cs-front { stroke: #f6ad55; stroke-width: 3; opacity: 0.85; }
+        .cs-ring.cs-echo { stroke: #f6ad55; stroke-width: 2; opacity: 0.7; }
+        .cs-ring.cs-burst { stroke: #fff; stroke-width: 2.5; opacity: 0.9; }
+        .cs-area.cs-hit { stroke: #f6ad55; stroke-width: 2.2; }
+        .cs-ring.cs-done { stroke: #2d9e60; stroke-width: 3; opacity: 0.9; }
+        .cs-tag { font: 600 13px system-ui; text-anchor: middle; paint-order: stroke;
+                  stroke: rgba(0,0,0,0.85); stroke-width: 3.5px; fill: #fff; }
+        .cs-tag tspan { font-weight: 400; font-size: 11px; fill: #ff9f8c; }
 
-        .cs-hud { position: absolute; top: 6px; left: 8px; right: 8px; display: flex;
+        .cs-hud { position: absolute; top: 14px; left: 18px; right: 18px; z-index: 3; display: flex;
                   align-items: baseline; gap: 12px; pointer-events: none; }
-        .cs-phase { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: #888; }
+        .cs-phase { font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: #8b98a8; }
         .cs-clock { margin-left: auto; display: flex; align-items: baseline; gap: 8px; opacity: 0; transition: opacity 400ms; }
         .cs-dayw.cs-on { opacity: 1; }
         .cs-clock:has(.cs-on) { opacity: 1; }
-        .cs-day { font-size: 30px; color: #dd6b20; font-variant-numeric: tabular-nums; }
-        .cs-speed { font-size: 11px; color: #999; }
-        .cs-count { position: absolute; top: 34px; right: 0; font-size: 12px; color: #888; }
-        .cs-count b { color: #2b6cb0; font-size: 16px; font-variant-numeric: tabular-nums; }
+        .cs-day { font-size: 40px; color: #f6ad55; font-variant-numeric: tabular-nums;
+                  text-shadow: 0 0 22px rgba(246,173,85,0.45); }
+        .cs-dayw { color: #8b98a8; }
+        .cs-speed { font-size: 11px; color: #71809000; }
+        .cs-clock:hover .cs-speed, .cs-dayw.cs-on ~ .cs-speed { color: #718090; }
+        .cs-count { position: absolute; top: 44px; right: 0; font-size: 12px; color: #8b98a8; }
+        .cs-count b { color: #63b3ed; font-size: 18px; font-variant-numeric: tabular-nums; }
 
-        .cs-board { position: absolute; right: 8px; bottom: 34px; width: 172px; pointer-events: none;
-                    font-size: 11px; color: #888; }
+        .cs-board { position: absolute; right: 16px; bottom: 74px; width: 176px; pointer-events: none;
+                    font-size: 11px; color: #8b98a8; z-index: 2; }
         .cs-bh { text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; margin-bottom: 3px; }
         .cs-br { display: flex; justify-content: space-between; padding: 1px 0; }
-        .cs-br b { color: #dd6b20; font-variant-numeric: tabular-nums; }
+        .cs-br b { color: #f6ad55; font-variant-numeric: tabular-nums; }
 
-        .cs-cap { position: absolute; left: 8px; bottom: 8px; right: 190px; min-height: 34px;
-                  font-size: 15px; line-height: 1.35; color: #e8e8e8; text-shadow: 0 1px 6px rgba(0,0,0,0.6); }
+        .cs-ev { position: absolute; left: 50%; top: 48%; transform: translate(-50%,-50%) scale(0.97);
+                 z-index: 4; min-width: 330px; padding: 16px 20px; border-radius: 12px;
+                 background: rgba(8,12,18,0.92); border: 1px solid rgba(255,255,255,0.14);
+                 box-shadow: 0 18px 60px rgba(0,0,0,0.6); opacity: 0; pointer-events: none;
+                 transition: opacity 400ms ease, transform 400ms cubic-bezier(.2,1.3,.4,1); }
+        .cs-ev.cs-on { opacity: 1; transform: translate(-50%,-50%) scale(1); }
+        .cs-ev-h { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+                   color: #8b98a8; margin-bottom: 10px; }
+        .cs-ev-r { display: flex; justify-content: space-between; gap: 24px; padding: 3px 0;
+                   font-size: 12px; color: #9aa7b6; opacity: 0; animation: cs-rowin 260ms ease forwards; }
+        .cs-ev-r b { color: #e9eef5; font-weight: 600; }
+        @keyframes cs-rowin { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: none; } }
+        .cs-ev-f { margin-top: 12px; padding-top: 9px; border-top: 1px solid rgba(255,255,255,0.1);
+                   font-size: 10px; color: #6c7a8a; max-width: 330px; line-height: 1.5; }
+
+        .cs-mark { position: absolute; left: 50%; top: 30%; transform: translateX(-50%); z-index: 3;
+                   font-size: 30px; font-weight: 300; letter-spacing: 0.04em; color: #fff;
+                   opacity: 0; pointer-events: none; text-shadow: 0 2px 20px rgba(0,0,0,0.8); }
+        .cs-mark.cs-flash { animation: cs-markin 2100ms ease forwards; }
+        @keyframes cs-markin { 0% { opacity: 0; transform: translateX(-50%) scale(0.9); }
+                               18% { opacity: 1; transform: translateX(-50%) scale(1); }
+                               72% { opacity: 1; } 100% { opacity: 0; } }
+        .cs-me { position: absolute; left: 18px; bottom: 86px; z-index: 3; font-size: 12px; color: #8b98a8; }
+        .cs-me b { color: #ff9f8c; font-variant-numeric: tabular-nums; font-size: 15px; }
+
+        .cs-bar { position: absolute; left: 18px; right: 18px; bottom: 74px; height: 4px; z-index: 3;
+                  background: rgba(255,255,255,0.12); border-radius: 2px; opacity: 0; transition: opacity 400ms; }
+        .cs-bar.cs-on { opacity: 1; }
+        .cs-bar-done { display: block; height: 100%; width: 0; border-radius: 2px;
+                       background: #2d9e60; transition: width 160ms linear; }
+
+        .cs-end { position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%) scale(0.96);
+                  z-index: 4; text-align: center; padding: 20px 28px; border-radius: 12px;
+                  background: rgba(8,12,18,0.88); border: 1px solid rgba(255,255,255,0.14);
+                  box-shadow: 0 18px 60px rgba(0,0,0,0.6); opacity: 0; pointer-events: none;
+                  transition: opacity 500ms ease, transform 500ms cubic-bezier(.2,1.3,.4,1); }
+        .cs-end.cs-on { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        .cs-end-n { font-size: 15px; color: #cfd8e3; }
+        .cs-end-n b { font-size: 34px; color: #2fbe74; font-variant-numeric: tabular-nums; }
+        .cs-end-s { margin-top: 6px; font-size: 15px; color: #cfd8e3; }
+        .cs-end-s b { font-size: 26px; color: #ff6b5a; font-variant-numeric: tabular-nums; }
+        .cs-end-o { margin-top: 10px; font-size: 12px; color: #8b98a8; max-width: 280px; }
+        .cs-end-o b { color: #ff9f8c; }
+
+        .cs-cap { position: absolute; left: 0; right: 0; bottom: 0; min-height: 46px; z-index: 3;
+                  padding: 14px 18px 16px; font-size: 17px; line-height: 1.4; color: #f2f4f7;
+                  background: linear-gradient(transparent, rgba(0,0,0,0.8) 62%); }
+        .cs-cap:empty { background: none; }
+        .cs-cap b { color: #f6ad55; }
         .cs-ctrl { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
         .cs-play, .cs-skip { cursor: pointer; border: 1px solid rgba(127,127,127,0.4); border-radius: 4px;
                              background: transparent; color: inherit; font-size: 12px; padding: 5px 12px; }
@@ -2853,6 +3147,8 @@ def _(anywidget, traitlets):
         cues = traitlets.List([]).tag(sync=True)
         clips = traitlets.Dict({}).tag(sync=True)
         horizon = traitlets.Int(180).tag(sync=True)
+        answered = traitlets.Float(0.25).tag(sync=True)
+        evidence = traitlets.Dict({}).tag(sync=True)
     return (CallStorm,)
 
 
@@ -2891,13 +3187,17 @@ def _(CallStorm, FIX_HORIZON, MAP_SIZE, map_centroids, map_shapes, mo):
 @app.cell
 def _(
     DATA_DIR,
+    STORM_ANSWERED,
     STORM_ISSUE,
     STORM_ORIGIN,
     STORM_PREMISE,
     STORM_TOPIC,
     base64,
     bloom_order,
+    fix_calibration,
     fix_clock,
+    fix_inputs,
+    fix_model,
     fix_summary,
     map_centroids,
     np,
@@ -2909,17 +3209,22 @@ def _(
         return [
             {"t": 0, "kind": "phase", "text": "Dialling 311"},
             {"t": 150, "kind": "ring"},
+            {"t": 700, "kind": "camera", "to": "origin", "pad": 4.2, "ms": 1500},
             {"t": 1100, "kind": "origin_card"},
             {"t": 1500, "kind": "audio", "clip": "premise"},
             {"t": 1500, "kind": "caption", "text": premise, "type": True},
-            {"t": 8600, "kind": "phase", "text": "Now the same call, from every neighborhood at once"},
+            {"t": 8600, "kind": "phase", "text": "Now the same call, from every neighborhood"},
             {"t": 8800, "kind": "caption", "text": "", "type": False},
+            {"t": 8700, "kind": "camera", "to": "full", "ms": 2500},
             {"t": 8900, "kind": "bloom"},
-            {"t": 12300, "kind": "caption", "text": issue, "type": False},
-            {"t": 14600, "kind": "phase", "text": "Reported"},
-            {"t": 14800, "kind": "collapse"},
-            {"t": 15900, "kind": "phase", "text": "Waiting"},
-            {"t": 15900, "kind": "countdown"},
+            {"t": 11400, "kind": "unison"},
+            {"t": 11400, "kind": "caption", "text": issue, "type": False},
+            {"t": 13600, "kind": "phase", "text": "The model reads each one"},
+            {"t": 13700, "kind": "evidence"},
+            {"t": 17600, "kind": "phase", "text": "and predicts how long each will wait"},
+            {"t": 17800, "kind": "collapse"},
+            {"t": 19100, "kind": "phase", "text": "Predicted wait"},
+            {"t": 19100, "kind": "countdown"},
         ]
 
     def storm_clips(data_dir):
@@ -2930,7 +3235,7 @@ def _(
         audio that never plays.
         """
         _d = data_dir / "demo_call"
-        _want = lambda _f: _f.stem == "premise" or _f.stem.startswith("issue_")
+        _want = lambda _f: _f.stem == "premise" or _f.stem.startswith(("issue_", "sfx_"))
         return {
             _f.stem: "data:audio/mpeg;base64," + base64.b64encode(_f.read_bytes()).decode()
             for _f in (sorted(_d.glob("*.mp3")) if _d.exists() else [])
@@ -2947,11 +3252,38 @@ def _(
         _r["csa"]: np.rint(_S[_idx[(STORM_TOPIC, _r["csa"])]] * 100).astype(int).tolist()
         for _r in _rows.iter_rows(named=True)
     }
+    def _answered_on(curve, threshold):
+        """First day three in four of an area's reports are closed, or None if that never happens."""
+        _hit = curve <= threshold
+        return int(np.argmax(_hit)) if _hit.any() else None
+
     storm_widget.labels = {
-        _r["csa"]: {"n": _r["n"], "clear": _r["median_days"],
-                    "open180": round(float(_r["still_open_at_horizon"]), 3)}
+        _r["csa"]: {
+            "n": _r["n"],
+            "clear": _answered_on(_S[_idx[(STORM_TOPIC, _r["csa"])]], STORM_ANSWERED),
+            "open180": round(float(_r["still_open_at_horizon"]), 3),
+        }
         for _r in _rows.iter_rows(named=True)
     }
+    # What the model is handed for this request, shown on screen before it answers. A viewer who
+    # cannot see the inputs has no way to tell a prediction from a recording of the past.
+    _o = fix_inputs.filter((pl.col("domain") == STORM_TOPIC) & (pl.col("csa") == STORM_ORIGIN))
+    _ex = _o.row(0, named=True) if _o.height else {}
+    storm_widget.evidence = {
+        "rows": [
+            ["problem type", STORM_TOPIC],
+            ["handled by", str(_ex.get("agency", "-"))],
+            ["reported via", str(_ex.get("method", "-"))],
+            ["city's own deadline", f"{_ex.get('sla_days', 0):.0f} days"],
+            ["how much this area calls", f"{_ex.get('reports_per_1k', 0):.0f} per 1,000 residents"],
+            ["vacant properties here", f"{_ex.get('vacancy', 0):.1f}%"],
+            ["past reports like it", f"{int(_ex.get('n', 0)):,}"],
+        ],
+        "trained": f"{fix_model['n_train']:,}",
+        "rounds": fix_model["rounds"],
+        "tested": f"{int(fix_calibration['n'].max()):,}",
+    }
+    storm_widget.answered = STORM_ANSWERED
     storm_widget.origin = STORM_ORIGIN
     storm_widget.bloom = bloom_order(STORM_ORIGIN, map_centroids)
     storm_widget.cues = storm_cues(STORM_PREMISE, STORM_ISSUE)
