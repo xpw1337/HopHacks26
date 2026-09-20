@@ -28,7 +28,13 @@
   --partial: #c8912f;
   --waiting: #b83227;
 
+  /* marimo's controls are shadcn components: they take their accent from these tokens rather than
+   * from accent-color, which is why setting accent-color on a range input did nothing. */
+  --primary: 205 28% 8%;
+  --ring: 205 28% 8%;
+
   --serif: "Newsreader", Iowan Old Style, Charter, Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -199,10 +205,10 @@
   gap: 1px;
 }
 .side-nav a {
-  padding: 6px 10px;
+  padding: 5px 0 5px 10px;
   color: var(--slate-600);
   text-decoration: none;
-  font-size: 0.88rem;
+  font-size: 0.86rem;
   border-left: 2px solid transparent;
   transition: border-color 160ms ease, color 160ms ease;
 }
@@ -241,14 +247,7 @@ body {
   background: #fbfaf8;
 }
 
-.markdown.prose > p,
-.markdown.prose > ul li,
-.markdown.prose > ol li,
-.markdown.prose > .paragraph {
-  font-size: 1.02rem;
-  line-height: 1.65;
-  color: #253340;
-}
+
 .markdown.prose {
   --tw-prose-body: #253340;
   --tw-prose-bold: var(--ink);
@@ -316,8 +315,122 @@ marimo-accordion {
   display: block;
 }
 
+/* ---- the rail --------------------------------------------------------------------------------
+ * The sidebar is the only thing on screen at all times, so it sets the tone before anything else
+ * does. It is a masthead and a contents list that happens to carry the controls, not a panel of
+ * widgets with a title on top.
+ */
 marimo-sidebar {
-  background: #f6f4f1;
+  background: #f5f3f0;
+  border-right: 1px solid var(--rule);
+}
+marimo-sidebar .markdown.prose > * {
+  max-width: none;
+}
+
+.rail-head {
+  padding-bottom: 14px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--rule);
+}
+.rail-title {
+  font-family: var(--serif);
+  font-size: 1.32rem;
+  font-weight: 500;
+  font-variation-settings: "opsz" 26;
+  letter-spacing: -0.012em;
+  color: var(--ink);
+  line-height: 1.1;
+}
+.rail-sub {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--slate-400);
+  margin-top: 5px;
+}
+
+/* Section labels match the italic serif used on the dark panels, so the two halves of the piece
+ * are speaking the same way. */
+.rail-label {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 0.95rem;
+  color: var(--slate-600);
+  margin: 20px 0 2px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+.rail-label em {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--slate-400);
+  margin-left: 6px;
+}
+.rail-note {
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--slate-400);
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule);
+}
+
+/* Controls: quiet, monochrome, and on the same 4px rhythm as everything else. Blue accents would
+ * be the only unexplained colour in the interface. */
+marimo-sidebar marimo-slider,
+marimo-sidebar marimo-dropdown,
+marimo-sidebar marimo-radio {
+  font-size: 0.82rem;
+}
+
+/* Ten weight rows were running about 140px each, which made the rail four screens long and mostly
+ * air. Collapse the stack gaps and let each row be the height of its control. */
+marimo-sidebar [style*="flex-direction: column"] {
+  gap: 0.35rem !important;
+}
+marimo-sidebar [style*="flex-direction: row"] {
+  gap: 0.5rem !important;
+  min-height: 0;
+}
+marimo-sidebar .markdown.prose > .paragraph {
+  display: inline;
+  margin: 0;
+}
+marimo-sidebar marimo-slider {
+  display: block;
+  padding: 2px 0;
+}
+
+/* The slider is rendered client-side, so it cannot be inspected from the export. These are the
+ * shapes a Radix slider uses: a track with an orientation attribute, and a thumb with a role. */
+marimo-sidebar input[type="range"] {
+  accent-color: var(--ink);
+}
+marimo-sidebar [role="slider"] {
+  background: var(--ink) !important;
+  border-color: var(--ink) !important;
+  box-shadow: none !important;
+}
+marimo-sidebar [data-orientation="horizontal"] > span,
+marimo-sidebar [data-orientation="horizontal"] span[style*="left"] {
+  background-color: var(--ink) !important;
+}
+marimo-sidebar label,
+marimo-sidebar .markdown.prose {
+  color: var(--slate-600);
+  font-size: 0.82rem;
+}
+marimo-sidebar select,
+marimo-sidebar button {
+  border-radius: 0;
+  border-color: var(--rule);
+  font-size: 0.8rem;
+  color: var(--ink);
+  background: #fff;
+}
+marimo-sidebar input[type="radio"] {
+  accent-color: var(--ink);
 }
 
 /* The board is an instrument and should not inherit the page's reading measure. */
@@ -341,6 +454,36 @@ marimo-sidebar {
 /* marimo renders markdown inside a Tailwind `contents` wrapper, which sets display: contents and
  * therefore generates no box at all: max-width on it does nothing. The children are what get laid
  * out, so they are what has to be measured. */
+/* The body is the piece. Headings in Newsreader over a generic sans made this read as a notebook
+ * with nicer titles; setting the text in the same face makes it read as writing. Newsreader is a
+ * reading face with an optical-size axis, so at text size it wants the low end of that axis: more
+ * open apertures, sturdier hairlines, a little more space between letters.
+ */
+.markdown.prose {
+  font-family: var(--serif);
+  font-size: 1.14rem;
+  line-height: 1.66;
+  font-variation-settings: "opsz" 16;
+  letter-spacing: 0.002em;
+  color: #1d2933;
+}
+.markdown.prose em {
+  font-style: italic;
+}
+.markdown.prose strong {
+  font-weight: 600;
+  color: var(--ink);
+}
+/* Anything that is not prose keeps the interface sans: controls, tables, captions, the rail. */
+marimo-table,
+marimo-sidebar,
+.slip-kicker,
+.slip-field,
+.board-line,
+.rail-sub {
+  font-family: var(--sans);
+}
+
 /* Stops a paragraph ending on a single stranded word. Cheap, and the sort of thing that separates
  * typeset text from text that merely has a typeface applied to it. */
 .markdown.prose > .paragraph,

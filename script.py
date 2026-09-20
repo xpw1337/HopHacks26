@@ -741,7 +741,10 @@ def _(fix_summary, mo, pl):
 @app.cell
 def _(DEFAULT_FIX_DAYS, DOMAIN_ORDER, mo):
     weight_sliders = mo.ui.dictionary(
-        {d: mo.ui.slider(0, 3, step=0.5, value=1, show_value=True, full_width=True) for d in DOMAIN_ORDER}
+        {
+            d: mo.ui.slider(0, 3, step=0.5, value=1, show_value=True, full_width=True, label=d)
+            for d in DOMAIN_ORDER
+        }
     )
     fix_days = mo.ui.slider(
         1, 60, step=1, value=DEFAULT_FIX_DAYS, show_value=True, label="Rank time still open over the first (days)"
@@ -762,12 +765,19 @@ def _(DEFAULT_FIX_DAYS, DOMAIN_ORDER, mo):
 @app.cell
 def _(DOMAIN_ORDER, fix_days, mo, per, weight_sliders, window):
     # The sidebar stays on screen while you scroll, so every chart below can be re-weighted in place.
-    _weight_rows = [
-        mo.hstack([mo.md(f"<small>{d}</small>"), weight_sliders[d]], widths=[1, 1], align="center") for d in DOMAIN_ORDER
-    ]
+    # The sliders label themselves now. Pairing a markdown block with a slider in an hstack was
+    # giving every row the height of a paragraph and turning the rail into four screens of air.
+    _weight_rows = [weight_sliders[d] for d in DOMAIN_ORDER]
     mo.sidebar(
         [
-            mo.md("### Baltimore Triage"),
+            mo.Html(
+                """
+                <div class="rail-head">
+                  <div class="rail-title">Baltimore Triage</div>
+                  <div class="rail-sub">311 service requests &middot; 2026</div>
+                </div>
+                """
+            ),
             # Plain "#section" links, not mo.nav_menu: nav_menu links to "/#section", which drops the
             # "?area=" query and reloads the whole app.
             mo.Html(
@@ -789,15 +799,18 @@ def _(DOMAIN_ORDER, fix_days, mo, per, weight_sliders, window):
                 )
                 + "</nav>"
             ),
-            mo.md("---\n**What counts**"),
+            mo.Html('<div class="rail-label">What counts</div>'),
             fix_days,
             window,
             per,
-            mo.md("**Topic weights** <small>(0 = ignore)</small>"),
+            mo.Html('<div class="rail-label">Topic weights <em>0 to ignore</em></div>'),
             *_weight_rows,
-            mo.md("<small>Vacant buildings always use parcels, and count rehabs and demolitions since Jan 2023.</small>"),
+            mo.Html(
+                '<p class="rail-note">Vacant buildings always use parcels, and count rehabs and '
+                "demolitions since January 2023.</p>"
+            ),
         ],
-        width="330px",
+        width="286px",
     )
     return
 
