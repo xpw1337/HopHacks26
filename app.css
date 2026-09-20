@@ -477,11 +477,23 @@ marimo-sidebar input[type="radio"] {
 /* Anything that is not prose keeps the interface sans: controls, tables, captions, the rail. */
 marimo-table,
 marimo-sidebar,
+marimo-download,
+marimo-download .markdown.prose,
 .slip-kicker,
 .slip-field,
 .board-line,
 .rail-sub {
   font-family: var(--sans);
+}
+
+/* A control is not prose. Without this the body serif lands on button labels, where a long one
+ * overflows the button and collides with whatever is above it. */
+marimo-download .markdown.prose,
+marimo-download .markdown.prose > * {
+  font-family: var(--sans);
+  font-size: 0.84rem;
+  line-height: 1.3;
+  max-width: none;
 }
 
 /* Stops a paragraph ending on a single stranded word. Cheap, and the sort of thing that separates
@@ -496,7 +508,7 @@ marimo-sidebar,
 .markdown.prose > blockquote,
 .markdown.prose > pre {
   display: block;
-  max-width: var(--measure);
+  max-width: min(var(--measure), 100%);
   margin-left: auto;
   margin-right: auto;
 }
@@ -520,7 +532,8 @@ marimo-table,
 marimo-callout-output,
 marimo-accordion,
 marimo-download {
-  max-width: var(--wide);
+  display: block;
+  max-width: min(var(--wide), 100%);
   margin-left: auto;
   margin-right: auto;
 }
@@ -535,7 +548,7 @@ marimo-tabs,
 marimo-lazy {
   display: block;
   width: 100%;
-  max-width: var(--bleed);
+  max-width: min(var(--bleed), 100%);
   margin-left: auto;
   margin-right: auto;
 }

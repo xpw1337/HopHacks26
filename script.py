@@ -987,12 +987,15 @@ def _(TRIAGE_AHEAD, TRIAGE_FROM, TRIAGE_TO, fix_queue, fix_stranded, fix_triage,
 
 
 @app.cell
-def _(dispatch_download, mo):
+def _(dispatch_download, fix_days, mo, per, window):
     mo.vstack(
         [
             mo.md(
                 "### Take it to the meeting\n"
-                "The ranked list for your current settings, with each area's three widest topic gaps."
+                f"The ranked list for your current settings &mdash; clock horizon {fix_days.value} days, "
+                f"{window.selected_key.lower()}, need per 1,000 "
+                f"{'residents' if per.value == 'pop' else 'parcels'} &mdash; with each area's three "
+                "widest topic gaps."
             ),
             dispatch_download,
         ]
@@ -4718,7 +4721,9 @@ def _(mo, overall, robust, pl, fix_days, window, per):
         data=_csv.encode("utf-8"),
         filename="baltimore_triage_dispatch.csv",
         mimetype="text/csv",
-        label=f"Download dispatch list (CSV) · clock horizon = {fix_days.value} days · {window.selected_key} · 311 need per 1,000 {'residents' if per.value == 'pop' else 'parcels'}",
+        # A button label is a label, not a sentence. The settings it was reciting are visible in the
+        # sidebar two inches away, and at body size the string was wider than the button.
+        label="Download the dispatch list (CSV)",
     )
     return (dispatch_download,)
 
