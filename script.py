@@ -728,6 +728,50 @@ def _(insights, mo):
 
 
 @app.cell
+def _(TRIAGE_AHEAD, TRIAGE_FROM, fix_queue, fix_triage, mo, pl):
+    _t = fix_triage
+    mo.vstack(
+        [
+            mo.md(
+                f"""
+    ### Monday morning
+
+    Everything above describes Baltimore. This is the part a city could use on a Tuesday.
+
+    There are **{fix_queue.height:,}** requests open right now that have already been waiting more
+    than {TRIAGE_FROM} days. Some will close this week on their own. The model ranks them by the
+    chance they will *still* be open {TRIAGE_AHEAD} days from now &mdash; not by age, because age
+    alone cannot tell a request that is about to be handled from one that has been forgotten.
+
+    Rebuilt on the first half of the year and tested on the {_t["n"]:,} later requests it had never
+    seen: flagging the worst **{_t["flagged"]:,}** &mdash; a tenth of the queue &mdash; catches
+    **{_t["recall"]:.0%}** of everything that really did stay open. **{_t["precision"]:.0%}** of
+    those flags are right, against **{_t["base"]:.0%}** if you picked at random: a
+    **{_t["lift"]:.1f}x** improvement, ranking at **{_t["auc"]:.3f}**.
+    """
+            ),
+            mo.ui.table(
+                fix_queue.head(200).select(
+                    pl.col("risk").round(3).alias(f"still open in {TRIAGE_AHEAD}d"),
+                    pl.col("days_open").alias("waiting"),
+                    pl.col("domain").alias("problem"),
+                    "csa",
+                    "address",
+                    pl.col("sla_days").round(0).cast(pl.Int64).alias("city deadline"),
+                ),
+                selection=None,
+                page_size=10,
+            ),
+            mo.md(
+                f"<small>Top 200 of {fix_queue.height:,}, worst first. The deadline column is the "
+                f"city's own promised turnaround for that request type.</small>"
+            ),
+        ]
+    )
+    return
+
+
+@app.cell
 def _(dispatch_download, mo):
     mo.vstack(
         [
@@ -958,6 +1002,9 @@ def _():
     # to mean anything here -- every area passes it inside three weeks -- and no area in this topic
     # ever reaches zero, so demanding all of them would paint the whole city as failing forever.
     STORM_ANSWERED = 0.25
+    # The work list. For a request already open this long, how likely is it to still be open this
+    # much later? Three weeks is far enough that the answer is not obvious and near enough to act on.
+    TRIAGE_FROM, TRIAGE_AHEAD = 7, 21
 
     # Colors: blue = over-served, orange = under-served (colorblind-safe pair).
     OVER, MID, UNDER = "#2b6cb0", "#f1f1f1", "#dd6b20"
@@ -983,6 +1030,8 @@ def _():
         STORM_ORIGIN,
         STORM_PREMISE,
         STORM_TOPIC,
+        TRIAGE_AHEAD,
+        TRIAGE_FROM,
         UNDER,
         VACANCY,
         VACANCY_SINCE,
@@ -1719,6 +1768,28 @@ def _(
             return float((_r[_o == 1].sum() - _n1 * (_n1 + 1) / 2) / (_n1 * (len(_o) - _n1)))
 
         _dom = np.array([_k[0] for _k in _keys])
+
+        # Does ranking the queue actually work? Take the requests still open at TRIAGE_FROM that we
+        # can still see TRIAGE_AHEAD days past, rank them by the model's conditional risk, and check
+        # how many of the ones it puts at the top really do stay open.
+        _span = TRIAGE_FROM + TRIAGE_AHEAD
+        _q = (_room >= _span) & (_exit > TRIAGE_FROM)
+        _score = np.divide(_ml[_q, min(_span, FIX_HORIZON)],
+                           np.maximum(_ml[_q, TRIAGE_FROM], 1e-9))
+        _truth = (_exit[_q] > _span).astype(float)
+        _order = np.argsort(-_score)
+        _top = _order[: max(1, len(_order) // 10)]
+        _base = _truth.mean() if len(_truth) else 0.0
+        _triage = {
+            "n": int(_q.sum()),
+            "base": float(_base),
+            "auc": _auc(_truth, _score),
+            "precision": float(_truth[_top].mean()) if len(_top) else 0.0,
+            "recall": float(_truth[_top].sum() / max(_truth.sum(), 1)),
+            "flagged": int(len(_top)),
+        }
+        _triage["lift"] = _triage["precision"] / _base if _base else 0.0
+
         _rows = []
         for _t in horizons:
             _sel = _room >= _t
@@ -1740,7 +1811,7 @@ def _(
                 "gap": _gap(_ml[_sel, _t], _o), "gap_simple": _gap(_sv[_sel, _t], _o),
                 "ranking": float(np.average(_a, weights=_w)) if _a else float("nan"),
             })
-        return pl.DataFrame(_rows)
+        return pl.DataFrame(_rows), _triage
 
     return (calibration_check,)
 
@@ -1810,6 +1881,9 @@ def _(
 @app.cell
 def _(
     FIX_CALIB_FROM,
+    FIX_HORIZON,
+    TRIAGE_AHEAD,
+    TRIAGE_FROM,
     areas,
     fix_features,
     median_days,
@@ -1875,6 +1949,23 @@ def _(
     )
     fix_topics = fix_topics.join(_naive, on="domain", how="left")
 
+    # Every request still open at the snapshot, ranked by how likely it is to still be open three
+    # weeks from now. This is the part of the model a city could actually use: sorting a work list
+    # this way beats sorting it by age, because plenty of old requests are about to close anyway.
+    _idx_r = np.arange(_per_request.shape[0])
+    _age = np.minimum(_r["exit"].to_numpy().astype(int), FIX_HORIZON)
+    _later = np.minimum(_age + TRIAGE_AHEAD, FIX_HORIZON)
+    _now = _per_request[_idx_r, _age]
+    fix_queue = (
+        _r.with_columns(
+            pl.Series("days_open", _age),
+            pl.Series("risk", np.divide(_per_request[_idx_r, _later], np.maximum(_now, 1e-9))),
+        )
+        .filter(~pl.col("event") & (pl.col("days_open") >= TRIAGE_FROM))
+        .select("csa", "domain", "address", "days_open", "risk", "sla_days")
+        .sort("risk", descending=True)
+    )
+
     # The typical request of each kind in each area, so the sequence can show what the model was
     # handed before it answers.
     fix_inputs = _r.group_by("domain", "csa").agg(
@@ -1885,17 +1976,17 @@ def _(
         pl.col("vacancy").first().alias("vacancy"),
         pl.len().alias("n"),
     )
-    return fix_clock, fix_inputs, fix_model, fix_summary, fix_topics
+    return fix_clock, fix_inputs, fix_model, fix_queue, fix_summary, fix_topics
 
 
 @app.cell
 def _(FIX_HOLDOUT_FROM, areas, calibration_check, requests_311, snapshot_meta):
     # Rebuilt on the early part of the year and scored on the rest, so the clock is judged on
     # requests it never saw.
-    fix_calibration = calibration_check(
+    fix_calibration, fix_triage = calibration_check(
         requests_311, areas, snapshot_ts=snapshot_meta["snapshot_ts"], cutoff=FIX_HOLDOUT_FROM
     )
-    return (fix_calibration,)
+    return fix_calibration, fix_triage
 
 
 @app.cell
