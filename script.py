@@ -1226,11 +1226,21 @@ def _(Path, build_snapshot, json, mo, pl, shapely):
 
 
 @app.cell
-def _(DOMAINS_311, LAYERS, live_count, mo, snapshot_meta):
-    _lights = ",".join(f"'{t}'" for t in DOMAINS_311["Streetlights"]["reported"])
-    _dark = live_count(LAYERS["sr311"], f"SRType IN ({_lights}) AND SRStatus IN ('Open','New')")
-    _vbn = live_count(LAYERS["open_notices"], "1=1")
-    if _dark is None or _vbn is None:
+def _(DOMAINS_311, LAYERS, ThreadPoolExecutor, live_count, mo, snapshot_meta):
+    def _open_count(item):
+        _topic, _types = item
+        _values = ",".join(f"'{t.replace(chr(39), chr(39) * 2)}'" for t in _types["reported"])
+        return _topic, live_count(
+            LAYERS["sr311"],
+            f"SRType IN ({_values}) AND SRStatus IN ('Open','New')",
+        )
+
+    with ThreadPoolExecutor(max_workers=6) as _pool:
+        _topic_counts = dict(_pool.map(_open_count, DOMAINS_311.items()))
+        _vbn = _pool.submit(live_count, LAYERS["open_notices"], "1=1").result()
+
+    _available = {topic: count for topic, count in _topic_counts.items() if count is not None}
+    if not _available and _vbn is None:
         live_banner = mo.callout(
             mo.md(
                 f"**Live data unavailable right now.** Everything below uses the saved snapshot "
@@ -1239,11 +1249,27 @@ def _(DOMAINS_311, LAYERS, live_count, mo, snapshot_meta):
             kind="warn",
         )
     else:
+        _request_summary = (
+            f"{sum(_available.values()):,} open resident requests across all "
+            f"{len(DOMAINS_311)} tracked 311 topics"
+            if len(_available) == len(DOMAINS_311)
+            else f"live request counts for {len(_available)} of {len(DOMAINS_311)} tracked 311 topics"
+        )
+        _vacancy_summary = (
+            f"{_vbn:,} open vacancy notices"
+            if _vbn is not None
+            else "vacancy count temporarily unavailable"
+        )
+        _breakdown = "\n".join(
+            f"- **{topic}:** {count:,}" if count is not None else f"- **{topic}:** unavailable"
+            for topic, count in _topic_counts.items()
+        )
         live_banner = mo.callout(
             mo.md(
-                f"**Live right now:** {_dark:,} streetlight reports still open · {_vbn:,} open vacancy notices. "
-                f"<small>(The analysis below uses the fixed snapshot from {snapshot_meta['snapshot_date']}, "
-                f"so the numbers in the text always match the charts.)</small>"
+                f"**Live city workload:** {_request_summary} · {_vacancy_summary}.\n\n"
+                f"{_breakdown}\n\n"
+                f"The analysis below uses the fixed snapshot from {snapshot_meta['snapshot_date']}, "
+                f"so its text and charts stay consistent."
             ),
             kind="info",
         )
