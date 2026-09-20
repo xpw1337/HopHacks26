@@ -106,8 +106,9 @@ def _(mo, snapshot_meta):
     calling 311.
 
     We score all 55 Community Statistical Areas on **need** (how bad conditions are) and
-    **service** (how well the city responds to that need). The priority is the **neglect gap**:
-    how far an area falls below the service its level of need predicts.
+    **service** (how long those problems stay open — the same clock as a single resident call).
+    The priority is the **neglect gap**: how far an area falls below the service its level of
+    need predicts.
 
     *(Data snapshot: {snapshot_meta["snapshot_date"]}.)*
     """)
@@ -182,7 +183,7 @@ def _(mo):
 def _(mo, snapshot_meta):
     _c = snapshot_meta["counts"]
     _rows = [
-        ("311 Customer Service Requests (2026)", f'{_c["requests_311"]:,}', "Need (reports) and service (closing speed, proactive tickets)"),
+        ("311 Customer Service Requests (2026)", f'{_c["requests_311"]:,}', "Need (reports) and service (time still open, proactive tickets)"),
         ("Vacant Building Notices (open)", f'{_c["open_notices"]:,}', "Vacancy need (written by inspectors)"),
         ("Rehabs of Vacant Buildings", f'{_c["rehabs"]:,}', "Vacancy service"),
         ("Completed City Demolitions", f'{_c["demolitions"]:,}', "Vacancy service"),
@@ -216,11 +217,12 @@ def _(mo, snapshot_meta):
 
 
 @app.cell
-def _(mo, quality_panel, method_check):
+def _(mo, quality_panel, method_check, clock_vs_cutoff):
     mo.accordion(
         {
             "Data quality checks (click to open)": quality_panel,
             "Why service is a share of need, not a count (click to open)": method_check,
+            "Clock vs old 7-day cutoff (click to open)": clock_vs_cutoff,
         }
     )
     return
@@ -240,8 +242,31 @@ def _(mo):
 
 
 @app.cell
-def _(explorer):
-    explorer
+def _(explorer, mo, skyline_view):
+    _skyline = mo.vstack(
+        [
+            mo.md(r"""
+            Tower height is the **positive weighted neglect gap**, using the same topic weights as
+            the 2D map. Drag to rotate, scroll to zoom, and click an area to pin it.
+            """),
+            # Keep the two large map widgets below marimo's output-size ceiling by
+            # sending the skyline only when its tab is opened.
+            mo.lazy(skyline_view),
+        ]
+    )
+    mo.vstack(
+        [
+            mo.md(r"""
+            Switch between the operational **neglect gap** map and the 3D **neglect skyline**.
+            """),
+            mo.ui.tabs(
+                {
+                    "Neglect gap — streets and work list": explorer,
+                    "Neglect skyline — gap towers": _skyline,
+                }
+            ),
+        ]
+    )
     return
 
 
@@ -262,8 +287,9 @@ def _(FIX_HORIZON, fix_topics, mo, pl):
         rf"""
     ### The fix clock
 
-    The map above asks which areas are under-served. This one asks a blunter question: **if you report
-    it today, when does it get fixed?**
+    The map above ranks areas by the area under this same curve: how much of the first week a
+    typical request is already closed. This view asks the blunter question: **if you report it
+    today, when does it get fixed?**
 
     Press play. Every area starts fully shaded, and the color drains as its requests close. Whatever is
     still standing at the end never got fixed at all.
@@ -291,9 +317,9 @@ def _(DATA_DIR, json, mo):
 
 
 @app.cell
-def _(DATA_DIR, call_pick, demo_calls, fix_summary, mo, pl):
+def _(DATA_DIR, call_pick, demo_calls, domain_scores, fix_days, fix_summary, mo, overall, pl):
     def call_panel(calls, picked, summary):
-        """Show a reported complaint next to what the clock predicts for it."""
+        """Show a reported complaint next to the clock and that area's gap rank."""
         _c = next((_x for _x in calls if _x["id"] == picked), None)
         if _c is None:
             return mo.md("")
@@ -310,6 +336,19 @@ def _(DATA_DIR, call_pick, demo_calls, fix_summary, mo, pl):
             )
         else:
             _verdict = f"Logged as **{_c['domain']}** in **{_c['csa']}**, which has too few requests like it to score."
+        _gap = overall.filter(pl.col("csa") == _c["csa"])
+        _topic = domain_scores.filter((pl.col("csa") == _c["csa"]) & (pl.col("domain") == _c["domain"]))
+        if _gap.height and _topic.height:
+            _g, _t = _gap.row(0, named=True), _topic.row(0, named=True)
+            _svc = (
+                "not enough requests to score"
+                if _t["service_rate"] is None
+                else f"**{100 * _t['service_rate']:.0f}%** of the first {fix_days.value} days already closed"
+            )
+            _verdict += (
+                f" That same clock is what the map ranks: **{_c['csa']}** is gap rank "
+                f"**{_g['rank']}** of {overall.height}, and {_c['domain']} service is {_svc}."
+            )
         return mo.vstack(
             [
                 mo.audio(str(_audio)) if _c["audio"] and _audio.exists() else mo.md(""),
@@ -632,7 +671,7 @@ def _(DEFAULT_FIX_DAYS, DOMAIN_ORDER, mo):
         {d: mo.ui.slider(0, 3, step=0.5, value=1, show_value=True, full_width=True) for d in DOMAIN_ORDER}
     )
     fix_days = mo.ui.slider(
-        1, 60, step=1, value=DEFAULT_FIX_DAYS, show_value=True, label="Counts as a fast fix if closed within (days)"
+        1, 60, step=1, value=DEFAULT_FIX_DAYS, show_value=True, label="Rank time still open over the first (days)"
     )
     window = mo.ui.dropdown(
         options={"All of 2026 so far": 0, "Last 180 days": 180, "Last 90 days": 90},
@@ -898,7 +937,9 @@ def _(MIN_REQUESTS, mo):
 
     ### Future work
 
-    - **Time-to-fix curves** that follow still-open requests over time, not just a single cutoff.
+    - **Vacancy duration.** 311 ranking now uses the fix clock; vacant buildings still use share
+      handled since 2023, not how long a notice has sat.
+    - **A block-level compound score** so “one block, three tickets” is a number, not only a story.
     - **A tipping-point model** for vacancy spreading from one house to its neighbors.
     - **Owner matching** across property records to find the biggest holders of neglected property.
     - **A real test.** Save today's ranking and check in six months whether high-gap areas got more service.
@@ -914,7 +955,7 @@ def _(mo):
 
     **What worked well**
 
-    - **Reactivity made the method honest.** Sliders, the time window and the "fast fix" cutoff all feed
+    - **Reactivity made the method honest.** Sliders, the time window and the clock horizon all feed
       one scoring function. marimo re-runs only what depends on them, so the map, scatter, Gap Card,
       robust top 10 and CSV always agree.
     - **One file, two products.** `marimo edit` shows this notebook with its code; `marimo run` serves the
@@ -1053,7 +1094,7 @@ def _():
     DOMAIN_ORDER = [VACANCY, *DOMAINS_311]
     MIN_REQUESTS = 10  # below this, an area's service score for a topic is hidden
     VACANCY_SINCE = "2023-01-01"  # rehabs and demolitions counted from this date
-    DEFAULT_FIX_DAYS = 7  # at 30 days most sanitation topics are ~100% closed everywhere, so service can't tell areas apart
+    DEFAULT_FIX_DAYS = 7  # clock horizon; binary 30-day close rates saturate for sanitation
     ROBUST_SHARE = 0.8  # "robust" = in the top 10 under at least this share of random weightings
 
     FIX_HORIZON = 180  # days a reported request is followed for before we stop counting
@@ -1426,7 +1467,7 @@ def _(DOMAINS_311, LAYERS, ThreadPoolExecutor, live_count, mo, snapshot_meta):
 
 
 @app.cell
-def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta):
+def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, np, pl, timedelta):
     def pct_rank(col):
         """Percentile rank (0 = lowest, 1 = highest) within each topic, ignoring missing values."""
         _c = pl.col(col)
@@ -1446,11 +1487,34 @@ def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta
         _slope = pl.when(_sxx > 0).then(((_x - _xm) * (_y - _ym)).sum().over("domain") / _sxx).otherwise(0.0)
         return -(_y - (_ym + _slope * (pl.col(need_col) - _xm)))
 
-    def score_areas(requests_311, housing, areas, *, snapshot_ts, window_days, fix_days, per, metric="residual"):
+    def duration_service(fix_clock, t):
+        """Share of the first t days a typical request is already closed: 1 - mean(S[0:t]).
+
+        S(u) is the share still open on day u, the same curve the Fix Clock draws. The mean of
+        S from day 0 through day t is RMST(t) / (t + 1): the fraction of that window spent
+        unfixed. Subtracting from 1 makes a service share. Cells with a median of "never"
+        still get a finite number.
+        """
+        _S = np.asarray(fix_clock["S"], dtype=float)
+        _t = int(min(max(int(t), 0), _S.shape[1] - 1))
+        return fix_clock["cells"].with_columns(
+            pl.Series("duration_share", 1.0 - _S[:, : _t + 1].mean(axis=1)),
+            # UInt32 matches the vacancy n_service column so diagonal concat stays aligned.
+            pl.Series("n_clock", np.rint(np.asarray(fix_clock["n"])).astype(np.uint32)),
+        )
+
+    def score_areas(
+        requests_311, housing, areas, *, snapshot_ts, window_days, fix_days, per,
+        metric="residual", service="duration", fix_clock=None,
+    ):
         """Need and service per area and topic, as raw rates and percentiles, plus the gap.
 
         Service is always a share of need in the same topic (never a count per resident or parcel),
         so an area does not look well served just because it has a lot of problems.
+
+        `service="duration"` (default) is 1 − mean(S[0:t]) from the precomputed Fix Clock,
+        sliced at `fix_days`. Need still follows `window_days` and `per`. Vacancy is unchanged
+        (share handled since 2023). `service="fast_share"` is the old binary close-within-t rule.
 
         `metric="residual"` scores the gap as how far below the fitted service-on-need line an area
         sits. `metric="difference"` is the original need_pct - service_pct, kept for comparison: it
@@ -1467,16 +1531,27 @@ def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta
         _reported = _sr.filter(~pl.col("proactive"))
         _need = _reported.group_by("csa", "domain").agg(pl.len().alias("n_reports"))
 
-        # Service 1: share of reports closed within `fix_days` (still-open ones count as not closed).
-        # Only reports old enough to have had the full `fix_days` are counted.
-        _fast = (
-            _reported.filter(pl.col("created") <= _end - timedelta(days=fix_days))
-            .with_columns(
-                ((pl.col("closed") - pl.col("created")) <= pl.duration(days=fix_days)).fill_null(False).alias("fast")
+        # Service 1: how long requests stay open (default), or the old closed-within-t share.
+        if service == "duration":
+            if fix_clock is None:
+                raise ValueError("fix_clock is required when service='duration'")
+            _dur = duration_service(fix_clock, fix_days)
+            _fast = _dur.select(
+                "csa", "domain",
+                pl.col("n_clock").alias("n_service"),
+                pl.col("duration_share").alias("closed_fast_share"),
             )
-            .group_by("csa", "domain")
-            .agg(pl.len().alias("n_service"), pl.col("fast").mean().alias("closed_fast_share"))
-        )
+        elif service == "fast_share":
+            _fast = (
+                _reported.filter(pl.col("created") <= _end - timedelta(days=fix_days))
+                .with_columns(
+                    ((pl.col("closed") - pl.col("created")) <= pl.duration(days=fix_days)).fill_null(False).alias("fast")
+                )
+                .group_by("csa", "domain")
+                .agg(pl.len().alias("n_service"), pl.col("fast").mean().alias("closed_fast_share"))
+            )
+        else:
+            raise ValueError(f"unknown service={service!r}")
 
         # Service 2: proactive tickets per resident report (only topics that have proactive twins)
         _pro = _sr.filter(pl.col("proactive")).group_by("csa", "domain").agg(pl.len().alias("n_proactive"))
@@ -1568,7 +1643,7 @@ def _(DOMAINS_311, MIN_REQUESTS, VACANCY, VACANCY_SINCE, datetime, pl, timedelta
             .sort("gap", descending=True)
             .with_row_index("rank", offset=1)
         )
-    return neglect_residual, score_areas, summarize
+    return duration_service, neglect_residual, score_areas, summarize
 
 
 @app.cell
@@ -1948,6 +2023,7 @@ def _(
     DEFAULT_FIX_DAYS,
     DOMAIN_ORDER,
     areas,
+    fix_clock,
     housing,
     rank_stability,
     requests_311,
@@ -1956,13 +2032,106 @@ def _(
     summarize,
 ):
     # Fixed default settings: these back every number written in the text, so prose never drifts from charts.
+    # 311 service is the Fix Clock sliced at DEFAULT_FIX_DAYS (same S the map and demo calls use).
     default_scores = score_areas(
         requests_311, housing, areas,
         snapshot_ts=snapshot_meta["snapshot_ts"], window_days=0, fix_days=DEFAULT_FIX_DAYS, per="pop",
+        service="duration", fix_clock=fix_clock,
     )
     default_overall = summarize(default_scores, {d: 1 for d in DOMAIN_ORDER})
     default_robust = rank_stability(default_scores)
     return default_overall, default_robust, default_scores
+
+
+@app.cell
+def _(
+    DEFAULT_FIX_DAYS,
+    DOMAIN_ORDER,
+    areas,
+    default_overall,
+    default_scores,
+    fix_clock,
+    housing,
+    mo,
+    pl,
+    requests_311,
+    score_areas,
+    snapshot_meta,
+    spearman,
+    summarize,
+):
+    _kw = dict(
+        snapshot_ts=snapshot_meta["snapshot_ts"], window_days=0, per="pop",
+    )
+    _eq = {d: 1 for d in DOMAIN_ORDER}
+    _cut7 = score_areas(
+        requests_311, housing, areas, **_kw, fix_days=DEFAULT_FIX_DAYS, service="fast_share",
+    )
+    _cut30 = score_areas(requests_311, housing, areas, **_kw, fix_days=30, service="fast_share")
+    _dur30 = score_areas(
+        requests_311, housing, areas, **_kw, fix_days=30, service="duration", fix_clock=fix_clock,
+    )
+    _diff = score_areas(
+        requests_311, housing, areas, **_kw, fix_days=DEFAULT_FIX_DAYS,
+        service="duration", fix_clock=fix_clock, metric="difference",
+    )
+    _o_cut = summarize(_cut7, _eq)
+    _o_diff = summarize(_diff, _eq)
+    _cmp = default_overall.select("csa", pl.col("rank").alias("rank_duration")).join(
+        _o_cut.select("csa", pl.col("rank").alias("rank_cutoff")), on="csa",
+    )
+    _r_rank = spearman(_cmp["rank_duration"], _cmp["rank_cutoff"])
+    _r_need_gap = spearman(default_overall["need"], default_overall["gap"])
+    _r_need_gap_diff = spearman(_o_diff["need"], _o_diff["gap"])
+    _r_need_svc = spearman(default_overall["need"], default_overall["service"])
+    _san = ["Illegal dumping", "Dirty streets & alleys", "Rats", "Graffiti"]
+
+    def _sat(scores, label):
+        _s = scores.filter(pl.col("domain").is_in(_san) & pl.col("service_rate").is_not_null())
+        _n = _s.height
+        return {
+            "label": label,
+            "mean": float(_s["service_rate"].mean()) if _n else float("nan"),
+            "std": float(_s["service_rate"].std()) if _n else float("nan"),
+            "share_ge_95": float(_s.filter(pl.col("service_rate") >= 0.95).height / _n) if _n else float("nan"),
+        }
+
+    _rows = [
+        _sat(_cut7, "cutoff, 7 days"),
+        _sat(_cut30, "cutoff, 30 days"),
+        _sat(default_scores, "clock, 7 days"),
+        _sat(_dur30, "clock, 30 days"),
+    ]
+    clock_vs_cutoff_stats = {
+        "rank_spearman": _r_rank,
+        "need_gap_residual": _r_need_gap,
+        "need_gap_difference": _r_need_gap_diff,
+        "need_service": _r_need_svc,
+        "sanitation": _rows,
+    }
+    _table = "\n".join(
+        f"| {r['label']} | {r['mean']:.0%} | {r['std']:.2f} | {100 * r['share_ge_95']:.0f}% |" for r in _rows
+    )
+    clock_vs_cutoff = mo.md(f"""
+    The map ranks the **same clock** the resident call uses (share of the first {DEFAULT_FIX_DAYS}
+    days already closed), not a binary “closed within {DEFAULT_FIX_DAYS} days” cutoff. The old
+    cutoff is kept as `service="fast_share"` so we can check the two rankings against each other.
+
+    - Gap rank, clock vs cutoff (equal weights): Spearman **{_r_rank:+.2f}**.
+    - Need vs gap, residual (what the map uses): **{_r_need_gap:+.2f}**. Need vs gap, raw
+      need − service: **{_r_need_gap_diff:+.2f}**. The residual keeps the ranking from becoming
+      a need map.
+    - Need vs service percentiles: **{_r_need_svc:+.2f}**.
+
+    Sanitation (dumping, dirty streets, rats, graffiti). At 30 days the old cutoff saturates.
+    The clock still notices *when* inside the window a ticket closed, so we keep the default
+    horizon at {DEFAULT_FIX_DAYS} days.
+
+    | Measure | Mean service | Std | Share ≥ 95% |
+    | --- | --- | --- | --- |
+    {_table}
+    """)
+    return clock_vs_cutoff, clock_vs_cutoff_stats
 
 
 @app.cell
@@ -2088,6 +2257,7 @@ def _(FIX_HOLDOUT_FROM, areas, calibration_check, requests_311, snapshot_meta):
 @app.cell
 def _(
     areas,
+    fix_clock,
     fix_days,
     housing,
     mo,
@@ -2104,10 +2274,12 @@ def _(
         sum(weight_sliders.value.values()) == 0,
         mo.callout(mo.md("All topic weights are 0. Turn at least one slider up."), kind="warn"),
     )
+    # Re-slice the trained clock at the slider horizon. Need follows the window / per controls.
     domain_scores = score_areas(
         requests_311, housing, areas,
         snapshot_ts=snapshot_meta["snapshot_ts"],
         window_days=window.value, fix_days=fix_days.value, per=per.value,
+        service="duration", fix_clock=fix_clock,
     )
     overall = summarize(domain_scores, weight_sliders.value)
     robust = rank_stability(domain_scores)
@@ -2932,6 +3104,349 @@ def _(anywidget, traitlets):
 
 @app.cell
 def _(anywidget, traitlets):
+    class NeglectSkyline(anywidget.AnyWidget):
+        """Rotatable 3D columns: unresolved report burden over the Baltimore map."""
+
+        _esm = r"""
+        const OVER = [43, 108, 176], MID = [241, 241, 241], UNDER = [221, 107, 32];
+        const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+        const color = (gap, alpha=1) => {
+          if (gap === null || gap === undefined) return `rgba(140,140,140,${alpha})`;
+          const t = Math.max(-1, Math.min(1, gap / 0.6));
+          const c = t < 0 ? mix(MID, OVER, -t) : mix(MID, UNDER, t);
+          return `rgba(${c.join(",")},${alpha})`;
+        };
+        const shade = (css, amount) => {
+          const m = css.match(/rgba?\((\d+),(\d+),(\d+)/);
+          if (!m) return css;
+          return `rgb(${[1,2,3].map(i => Math.max(0, Math.min(255, +m[i] + amount))).join(",")})`;
+        };
+        const signed = (gap) => (gap > 0 ? "+" : "") + Math.round(gap * 100);
+        const esc = (s) => String(s).replace(/[&<>"]/g, c => (
+          { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]
+        ));
+
+        function render({ model, el }) {
+          el.innerHTML = `
+            <div class="ns-wrap">
+              <div class="ns-head">
+                <div><b class="ns-title"></b><span class="ns-sub">tower height = positive neglect gap</span></div>
+                <div class="ns-city"></div>
+              </div>
+              <div class="ns-main">
+                <div class="ns-stage">
+                  <canvas></canvas><div class="ns-tip" hidden></div><div class="ns-picked" hidden></div>
+                </div>
+                <div class="ns-card"></div>
+              </div>
+              <div class="ns-controls">
+                <label>Rotate<input class="ns-angle" type="range" min="-65" max="65" value="-24" step="1"></label>
+                <button class="ns-reset" title="Reset rotation and zoom">Reset view</button>
+              </div>
+              <div class="ns-legend">
+                <span>over-served</span><i class="ns-grad"></i><span>under-served</span>
+                <span class="ns-key">drag to rotate · scroll to zoom · click to pin</span>
+              </div>
+            </div>`;
+
+          const canvas = el.querySelector("canvas"), stage = el.querySelector(".ns-stage");
+          const tip = el.querySelector(".ns-tip"), angle = el.querySelector(".ns-angle");
+          const title = el.querySelector(".ns-title");
+          const city = el.querySelector(".ns-city"), picked = el.querySelector(".ns-picked");
+          const cardEl = el.querySelector(".ns-card");
+          const resetView = el.querySelector(".ns-reset");
+          let columns = [], ground = [];
+          let hovered = null, selected = model.get("selected") || null, zoom = 1.08, projection = null;
+          let dragging = false, dragX = 0, dragAngle = 0, moved = false;
+
+          const datum = (csa) => ((model.get("data") || {}).areas || {})[csa];
+          const drawCard = () => {
+            const data = model.get("data") || {}, focus = model.get("focus") || "";
+            const card = data.card;
+            if (!selected) {
+              cardEl.innerHTML = `<div class="ngc-empty"><b>Gap Card</b><span>Click a tower or map area to compare its need and service by topic.</span></div>`;
+              return;
+            }
+            if (!card || card.csa !== selected) {
+              cardEl.innerHTML = `<div class="ngc-empty"><b>${esc(selected)}</b><span>Loading its Gap Card…</span></div>`;
+              return;
+            }
+            const CW = 230, PAD = 10, x = p => PAD + p * (CW - 2 * PAD);
+            let html = `<div class="ngc-head"><b>${esc(card.csa)}</b><span>${esc(card.subtitle)}</span></div>
+              <div class="ngc-row ngc-scale"><span></span><svg width="${CW}" height="14"><text x="${PAD}" y="11">0%</text>
+              <text x="${CW / 2}" y="11" text-anchor="middle">50%</text><text x="${CW - PAD}" y="11" text-anchor="end">100%</text></svg><span>gap</span></div>`;
+            for (const row of card.rows) {
+              const rowColor = row.gap === null ? "#999" : row.gap > 0 ? "#dd6b20" : "#2b6cb0";
+              let marks = `<line x1="${PAD}" x2="${CW - PAD}" y1="12" y2="12" class="ngc-track"/>`;
+              if (row.gap !== null) {
+                marks += `<line x1="${x(row.need)}" x2="${x(row.service)}" y1="12" y2="12" stroke="${rowColor}" stroke-width="4"/>`;
+                marks += `<circle cx="${x(row.service)}" cy="12" r="6" fill="white" stroke="${rowColor}" stroke-width="2.5"/>`;
+              }
+              marks += `<circle cx="${x(row.need)}" cy="12" r="6" fill="${rowColor}"/>`;
+              html += `<div class="ngc-row${focus === row.domain ? " ngc-focus" : ""}${row.gap === null ? " ngc-na" : ""}"
+                data-domain="${esc(row.domain)}" title="${esc(row.detail)}"><span class="ngc-name">${esc(row.domain)}</span>
+                <svg width="${CW}" height="24">${marks}</svg><span class="ngc-gap" style="color:${rowColor}">
+                ${row.gap === null ? "n/a" : signed(row.gap)}</span></div>`;
+            }
+            html += `<div class="ngc-foot"><span class="ngc-dot" style="background:#555"></span> need
+              <span class="ngc-dot ngc-hollow"></span> service · <span style="color:#dd6b20">orange = under-served</span> ·
+              <span style="color:#2b6cb0">blue = over-served</span><br>Click a row to color the skyline by that topic.
+              Click it again for all topics. Hover for raw numbers.</div>`;
+            cardEl.innerHTML = html;
+          };
+
+          const resize = () => {
+            const dpr = window.devicePixelRatio || 1;
+            const w = Math.max(320, stage.clientWidth), h = Math.max(360, Math.min(600, w * 0.66));
+            canvas.style.width = `${w}px`; canvas.style.height = `${h}px`;
+            canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+            draw();
+          };
+
+          const drawPrism = (ctx, c, h, fill, picked) => {
+            const w = picked ? 8 : 5.5, d = w * 0.55, x = c.x, y = c.y, top = y - h;
+            ctx.beginPath();
+            ctx.moveTo(x, top - d); ctx.lineTo(x + w, top); ctx.lineTo(x, top + d); ctx.lineTo(x - w, top);
+            ctx.closePath(); ctx.fillStyle = shade(fill, 24); ctx.fill();
+            ctx.beginPath();
+            ctx.moveTo(x - w, top); ctx.lineTo(x, top + d); ctx.lineTo(x, y + d); ctx.lineTo(x - w, y);
+            ctx.closePath(); ctx.fillStyle = shade(fill, -28); ctx.fill();
+            ctx.beginPath();
+            ctx.moveTo(x, top + d); ctx.lineTo(x + w, top); ctx.lineTo(x + w, y); ctx.lineTo(x, y + d);
+            ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+            if (picked) {
+              ctx.strokeStyle = "#111"; ctx.lineWidth = 2;
+              ctx.strokeRect(x - w - 2, top - d - 2, 2 * w + 4, h + 2 * d + 4);
+            }
+            return { x, y, top: top - d, w: Math.max(7, w + 2) };
+          };
+
+          const draw = () => {
+            const dpr = window.devicePixelRatio || 1, cw = canvas.width / dpr, ch = canvas.height / dpr;
+            const ctx = canvas.getContext("2d");
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, cw, ch);
+            const [W, H] = model.get("size"), theta = Number(angle.value) * Math.PI / 180;
+            const tilt = 0.58, scale = Math.min(cw / (W * 1.30), ch / (H * 0.96)) * zoom;
+            const baseY = ch * 0.75, cs = Math.cos(theta), sn = Math.sin(theta);
+            projection = { cw, ch, W, H, theta, tilt, scale, baseY, cs, sn };
+            const screen = ([x, y]) => {
+              const dx = x - W / 2, dy = y - H / 2;
+              return [cw / 2 + (dx * cs - dy * sn) * scale, baseY + (dx * sn + dy * cs) * scale * tilt];
+            };
+
+            // Ground plane: the same 55 CSA shapes as the 2D decision map.
+            ctx.save();
+            ctx.translate(cw / 2, baseY); ctx.scale(scale, scale * tilt); ctx.rotate(theta); ctx.translate(-W / 2, -H / 2);
+            ground = [];
+            for (const sh of model.get("shapes")) {
+              const row = datum(sh.csa), p = new Path2D(sh.d);
+              ctx.fillStyle = row ? color(row.gap, 0.42) : "rgba(140,140,140,0.20)";
+              ctx.fill(p);
+              ctx.strokeStyle = sh.csa === selected ? "#111" :
+                sh.csa === hovered ? "#2d3748" : "rgba(60,70,80,0.62)";
+              ctx.lineWidth = (sh.csa === selected ? 3.2 : sh.csa === hovered ? 2.4 : 1.15) / scale;
+              ctx.stroke(p);
+              ground.push({ csa: sh.csa, path: p, row });
+            }
+            ctx.restore();
+
+            let raw = [];
+            for (const [csa, point] of Object.entries(model.get("centroids"))) {
+              const row = datum(csa);
+              if (!row || row.gap === null || row.gap === undefined) continue;
+              const value = Math.max(0, row.gap);
+              const [x, y] = screen(point);
+              raw.push({ csa, row, value, x, y });
+            }
+            const max = Math.max(...raw.map(d => d.value), 1e-9);
+            raw.sort((a, b) => a.y - b.y);
+            columns = [];
+            for (const c of raw.filter(d => d.value > 0)) {
+              const h = 6 + Math.sqrt(Math.max(0, c.value) / max) * Math.min(160, ch * 0.31);
+              const hit = drawPrism(ctx, c, h, color(c.row.gap), c.csa === selected || c.csa === hovered);
+              columns.push({ ...c, ...hit, h });
+            }
+            const underserved = raw.filter(d => d.row.gap > 0);
+            const widest = underserved.length ? Math.max(...underserved.map(d => d.row.gap)) : 0;
+            city.innerHTML = raw.length
+              ? `<b>${underserved.length}</b> areas below expected service · widest gap +${widest.toFixed(2)}`
+              : "No scored areas at these weights";
+            if (selected && datum(selected)) {
+              const row = datum(selected), sign = row.gap > 0 ? "+" : "";
+              picked.innerHTML = `<b>${selected}</b><span>neglect gap ${row.gap == null ? "n/a" : sign + row.gap.toFixed(2)} · rank ${row.rank || "n/a"} · click empty map to clear</span>`;
+              picked.hidden = false;
+            } else {
+              picked.hidden = true;
+            }
+            drawCard();
+          };
+
+          const showTip = (event, c) => {
+            const box = stage.getBoundingClientRect(), sign = c.row.gap > 0 ? "+" : "";
+            const verdict = c.row.gap > 0 ? "below expected service" : "at or above expected service";
+            tip.innerHTML = `<b>${c.csa}</b><br>neglect gap ${c.row.gap == null ? "n/a" : sign + c.row.gap.toFixed(2)}` +
+              `<br>${verdict} · rank ${c.row.rank || "n/a"}`;
+            tip.hidden = false;
+            tip.style.left = `${Math.min(event.clientX - box.left + 12, box.width - 245)}px`;
+            tip.style.top = `${Math.max(6, event.clientY - box.top - 64)}px`;
+          };
+          const mapPoint = (x, y) => {
+            if (!projection) return null;
+            const { cw, W, H, tilt, scale, baseY, cs, sn } = projection;
+            const rx = (x - cw / 2) / scale, ry = (y - baseY) / (scale * tilt);
+            return [W / 2 + rx * cs + ry * sn, H / 2 - rx * sn + ry * cs];
+          };
+          const hitAt = (x, y) => {
+            const column = [...columns].reverse().find(c => x >= c.x-c.w && x <= c.x+c.w && y >= c.top && y <= c.y+8);
+            if (column) return column;
+            const point = mapPoint(x, y);
+            if (!point) return null;
+            const ctx = canvas.getContext("2d");
+            const area = [...ground].reverse().find(g => ctx.isPointInPath(g.path, point[0], point[1]));
+            if (!area || !area.row) return null;
+            return { ...area, value: Math.max(0, area.row.gap || 0) };
+          };
+          canvas.addEventListener("mousemove", (event) => {
+            const box = canvas.getBoundingClientRect(), x = event.clientX - box.left, y = event.clientY - box.top;
+            if (dragging) {
+              const delta = event.clientX - dragX;
+              if (Math.abs(delta) > 2) moved = true;
+              angle.value = Math.max(-65, Math.min(65, dragAngle + delta * 0.24));
+              tip.hidden = true; draw(); return;
+            }
+            const hit = hitAt(x, y);
+            const next = hit ? hit.csa : null;
+            if (next !== hovered) { hovered = next; draw(); }
+            if (hit) showTip(event, hit); else tip.hidden = true;
+          });
+          canvas.addEventListener("mouseleave", () => { hovered = null; tip.hidden = true; draw(); });
+          canvas.addEventListener("mousedown", (event) => {
+            dragging = true; moved = false; dragX = event.clientX; dragAngle = Number(angle.value);
+            canvas.classList.add("ns-dragging");
+          });
+          window.addEventListener("mouseup", (event) => {
+            if (!dragging) return;
+            dragging = false; canvas.classList.remove("ns-dragging");
+            if (!moved) {
+              const box = canvas.getBoundingClientRect();
+              const hit = hitAt(event.clientX - box.left, event.clientY - box.top);
+              selected = hit ? hit.csa : null;
+              model.set("selected", selected || "");
+              model.save_changes();
+              draw();
+            }
+          });
+          canvas.addEventListener("wheel", (event) => {
+            event.preventDefault();
+            zoom = Math.max(0.72, Math.min(1.75, zoom * (event.deltaY > 0 ? 0.92 : 1.08)));
+            draw();
+          }, { passive: false });
+          canvas.addEventListener("dblclick", () => {
+            zoom = 1.08; angle.value = -24; selected = null;
+            model.set("selected", ""); model.save_changes(); draw();
+          });
+
+          angle.addEventListener("input", draw);
+          cardEl.addEventListener("click", (event) => {
+            const row = event.target.closest("[data-domain]");
+            if (!row) return;
+            model.set("focus", model.get("focus") === row.dataset.domain ? "" : row.dataset.domain);
+            model.save_changes();
+          });
+          resetView.addEventListener("click", () => {
+            zoom = 1.08; angle.value = -24; selected = null; hovered = null;
+            model.set("selected", ""); model.save_changes(); draw();
+          });
+
+          const reset = () => {
+            const focus = model.get("focus") || "";
+            title.textContent = (focus || "Weighted") + " neglect gap";
+            draw();
+          };
+          model.on("change:data", reset);
+          model.on("change:focus", reset);
+          model.on("change:selected", () => {
+            selected = model.get("selected") || null;
+            draw();
+          });
+          model.on("change:shapes", draw);
+          new ResizeObserver(resize).observe(stage);
+          requestAnimationFrame(resize);
+          return () => {};
+        }
+        export default { render };
+        """
+
+        _css = r"""
+        .ns-wrap { font: 13px system-ui, -apple-system, sans-serif; }
+        .ns-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin-bottom: 4px; }
+        .ns-title { font-size: 17px; }
+        .ns-sub { display: block; color: #888; font-size: 11px; }
+        .ns-city { color: #777; font-size: 11px; text-align: right; }
+        .ns-city b { color: #dd6b20; font-size: 17px; }
+        .ns-main { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+        .ns-stage { flex: 1 1 560px; min-width: 300px; position: relative; border-radius: 12px; overflow: hidden;
+                    border: 1px solid rgba(90,100,110,.18);
+                    background: radial-gradient(ellipse at 50% 72%, rgba(43,108,176,.16), transparent 62%),
+                                linear-gradient(180deg, rgba(127,127,127,.035), rgba(127,127,127,.14)); }
+        .ns-card { flex: 0 1 440px; min-width: 300px; overflow-x: auto; }
+        .ns-stage canvas { display: block; width: 100%; cursor: grab; }
+        .ns-stage canvas.ns-dragging { cursor: grabbing; }
+        .ns-tip { position: absolute; pointer-events: none; background: rgba(20,20,20,.93); color: white;
+                  border-radius: 6px; padding: 7px 9px; max-width: 245px; font-size: 11px; z-index: 2; }
+        .ns-picked { position: absolute; left: 10px; top: 10px; padding: 6px 8px; border-radius: 6px;
+                     background: rgba(20,20,20,.86); color: white; pointer-events: none; font-size: 11px; }
+        .ns-picked b, .ns-picked span { display: block; }
+        .ns-picked span { color: #d9dee5; }
+        .ngc-empty { display: grid; gap: 5px; min-height: 120px; place-content: center; text-align: center;
+                     padding: 18px; border: 1px dashed rgba(127,127,127,.4); border-radius: 8px; color: #777; }
+        .ngc-empty b { color: inherit; font-size: 15px; }
+        .ngc-head { display: flex; justify-content: space-between; align-items: baseline; margin: 6px 0; gap: 12px; }
+        .ngc-head b { font-size: 15px; }
+        .ngc-head span { color: #777; font-size: 12px; text-align: right; }
+        .ngc-row { display: grid; grid-template-columns: 150px 230px 40px; align-items: center;
+                   cursor: pointer; border-radius: 4px; }
+        .ngc-row:hover { background: rgba(127,127,127,.12); }
+        .ngc-row.ngc-focus { background: rgba(221,107,32,.15); outline: 1px solid #dd6b20; }
+        .ngc-na .ngc-name { color: #999; }
+        .ngc-scale { cursor: default; color: #999; font-size: 10px; }
+        .ngc-scale:hover { background: none; }
+        .ngc-scale text { fill: #999; font-size: 10px; }
+        .ngc-track { stroke: rgba(127,127,127,.3); stroke-width: 1; }
+        .ngc-gap { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+        .ngc-foot { margin-top: 8px; color: #777; font-size: 11px; }
+        .ngc-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; vertical-align: middle; }
+        .ngc-hollow { border: 2px solid #555; width: 5px; height: 5px; }
+        .ns-controls { display: flex; justify-content: flex-end;
+                       align-items: center; gap: 12px; margin-top: 8px; }
+        .ns-controls label { display: grid; grid-template-columns: auto 1fr; gap: 7px; align-items: center;
+                             color: #777; font-size: 11px; min-width: 230px; }
+        .ns-controls input { width: 100%; accent-color: #dd6b20; }
+        .ns-reset { cursor: pointer; border: 1px solid rgba(127,127,127,.45); border-radius: 4px;
+                    background: transparent; color: inherit; padding: 5px 9px; font-size: 11px; }
+        .ns-legend { display: flex; align-items: center; gap: 6px; color: #888; font-size: 11px; margin-top: 7px; }
+        .ns-grad { width: 130px; height: 9px; border-radius: 2px;
+                   background: linear-gradient(90deg,#2b6cb0,#f1f1f1,#dd6b20); }
+        .ns-key { margin-left: auto; }
+        @media (max-width: 600px) {
+          .ns-controls { justify-content: stretch; }
+          .ns-controls label { flex: 1; min-width: 0; }
+          .ns-city { display: none; }
+        }
+        """
+
+        shapes = traitlets.List([]).tag(sync=True)
+        size = traitlets.List([1000, 1000]).tag(sync=True)
+        centroids = traitlets.Dict({}).tag(sync=True)
+        data = traitlets.Dict({}).tag(sync=True)
+        focus = traitlets.Unicode("").tag(sync=True)
+        selected = traitlets.Unicode("").tag(sync=True)
+    return (NeglectSkyline,)
+
+
+@app.cell
+def _(anywidget, traitlets):
     class CallStorm(anywidget.AnyWidget):
         """One call, then the same call from everywhere, then the wait.
 
@@ -3584,6 +4099,19 @@ def _(FIX_HORIZON, FixClock, MAP_SIZE, map_shapes, mo):
 
 
 @app.cell
+def _(MAP_SIZE, NeglectSkyline, default_overall, map_centroids, map_shapes, mo):
+    _asked = mo.query_params().get("area")
+    skyline_widget = NeglectSkyline(
+        shapes=map_shapes,
+        size=MAP_SIZE,
+        centroids=map_centroids,
+        selected=_asked if _asked in default_overall["csa"].to_list() else default_overall["csa"][0],
+    )
+    skyline_view = mo.ui.anywidget(skyline_widget)
+    return skyline_view, skyline_widget
+
+
+@app.cell
 def _(CallStorm, FIX_HORIZON, MAP_SIZE, map_centroids, map_shapes, mo):
     # Created once, like the maps above. Everything else is pushed in through the raw handle.
     storm_widget = CallStorm(
@@ -3722,10 +4250,99 @@ def _(clock_topic, clock_widget, fix_clock, fix_summary, np, pl):
 
 
 @app.cell
+def _(
+    DOMAIN_ORDER,
+    VACANCY,
+    domain_scores,
+    fix_days,
+    pl,
+    skyline_view,
+    skyline_widget,
+    weight_sliders,
+):
+    # A selected category behaves like the 2D Gap Card selector. "All topics" falls back to
+    # the same topic weights as the 2D map.
+    _focus = skyline_view.value.get("focus") or ""
+    _domains = (
+        [_focus]
+        if _focus in DOMAIN_ORDER
+        else [d for d in DOMAIN_ORDER if weight_sliders.value.get(d, 0) > 0]
+    )
+    _scores = {
+        (_r["domain"], _r["csa"]): _r
+        for _r in domain_scores.filter(pl.col("domain").is_in(_domains)).iter_rows(named=True)
+    }
+    _areas = {}
+    for _csa in domain_scores["csa"].unique().to_list():
+        _gnum = 0.0
+        _gden = 0.0
+        for _d in _domains:
+            _r = _scores.get((_d, _csa))
+            _w = 1.0 if _focus else float(weight_sliders.value.get(_d, 0))
+            if _r is None or _w <= 0:
+                continue
+            if _r["gap"] is not None:
+                _gnum += _w * float(_r["gap"])
+                _gden += _w
+        if _gden:
+            _areas[_csa] = {
+                "gap": round(_gnum / _gden, 4),
+            }
+
+    # Rank the exact gap painted in this view; it is topic-specific or the current weighted 311 gap.
+    _ranked = sorted(
+        ((c, r["gap"]) for c, r in _areas.items() if r["gap"] is not None),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+    for _rank, (_csa, _) in enumerate(_ranked, 1):
+        _areas[_csa]["rank"] = _rank
+
+    _selected = skyline_view.value.get("selected") or ""
+    _card = None
+    if _selected:
+        _card_rows = []
+        for _r in domain_scores.filter(pl.col("csa") == _selected).iter_rows(named=True):
+            _svc = "not enough requests" if _r["service_rate"] is None else f"{_r['service_rate']:.0%}"
+            _svc_label = (
+                "handled since 2023"
+                if _r["domain"] == VACANCY
+                else f"of the first {fix_days.value} days already closed"
+            )
+            _pro = "" if _r["proactive_share"] is None else f" · proactive share {_r['proactive_share']:.0%}"
+            _card_rows.append(
+                {
+                    "domain": _r["domain"],
+                    "need": _r["need_pct"],
+                    "service": _r["service_pct"],
+                    "gap": _r["gap"],
+                    "detail": (
+                        f"{_r['n_reports']:,} reports ({_r['need_rate']:.1f} per 1,000) · "
+                        f"{_svc} {_svc_label}{_pro}"
+                    ),
+                }
+            )
+        _area = _areas.get(_selected)
+        _card = {
+            "csa": _selected,
+            "subtitle": (
+                f"gap rank {_area['rank']} of {len(_areas)} · current gap {_area['gap']:+.2f}"
+                if _area else "not enough data for the selected view"
+            ),
+            "rows": _card_rows,
+        }
+    skyline_widget.data = {
+        "areas": _areas,
+        "card": _card,
+    }
+    return
+
+
+@app.cell
 def _(VACANCY, domain_scores, fix_days, overall, pl, triage_widget):
     def _detail(r):
         _svc = "not enough requests" if r["service_rate"] is None else f"{r['service_rate']:.0%}"
-        _svc_label = "handled since 2023" if r["domain"] == VACANCY else f"closed within {fix_days.value} days"
+        _svc_label = "handled since 2023" if r["domain"] == VACANCY else f"of the first {fix_days.value} days already closed"
         _pro = "" if r["proactive_share"] is None else f" · proactive share {r['proactive_share']:.0%}"
         return f"{r['n_reports']:,} reports ({r['need_rate']:.1f} per 1,000) · {_svc} {_svc_label}{_pro}"
 
@@ -3991,7 +4608,7 @@ def _(mo, overall, robust, pl, fix_days, window, per):
         data=_csv.encode("utf-8"),
         filename="baltimore_triage_dispatch.csv",
         mimetype="text/csv",
-        label=f"Download dispatch list (CSV) · fast fix = {fix_days.value} days · {window.selected_key} · 311 need per 1,000 {'residents' if per.value == 'pop' else 'parcels'}",
+        label=f"Download dispatch list (CSV) · clock horizon = {fix_days.value} days · {window.selected_key} · 311 need per 1,000 {'residents' if per.value == 'pop' else 'parcels'}",
     )
     return (dispatch_download,)
 
@@ -4054,8 +4671,9 @@ def _(VACANCY, alt, default_scores, mo, neglect_residual, pl, spearman):
             | --- | --- | --- |
             {_rows}
 
-            The same rule holds for every topic. 311 service is the **share** of that topic's requests closed
-            in time, and proactive work is proactive tickets **per resident report**. Neither grows just
+            The same rule holds for every topic. 311 service is how long that topic's requests stay
+            open: the share of the first week already closed, read off the same Fix Clock the map
+            ranks. Proactive work is proactive tickets **per resident report**. Neither grows just
             because an area has more problems.
             """),
             _chart,
@@ -4141,7 +4759,7 @@ def _(
         else ""
     )
     insights = f"""
-    All numbers use the default settings (equal weights, all of 2026, fast fix = {DEFAULT_FIX_DAYS} days).
+    All numbers use the default settings (equal weights, all of 2026, clock horizon = {DEFAULT_FIX_DAYS} days).
 
     1. **A short list holds up no matter what you weigh.** {_robust_text} The #1 gap under equal weights is
        **{_top["csa"]}** (widest topics: {_top["widest_gaps"]}). *See the robust top 10 chart.*
@@ -4152,7 +4770,8 @@ def _(
        share of vacant buildings handled, they move to {_m["top5_rank_new"]:.0f}: the more vacancy an area
        has, the *smaller* the share the city gets to. *See "Why service is a share of need" in the Data overview.*
 
-    3. **Response speed depends on where you live.** Streetlight reports closed within {DEFAULT_FIX_DAYS} days range from
+    3. **How long a fix takes depends on where you live.** Streetlight service (share of the first
+       {DEFAULT_FIX_DAYS} days already closed, same clock as the map) ranges from
        {_worst["service_rate"]:.0%} in **{_worst["csa"]}** to {_best["service_rate"]:.0%} in **{_best["csa"]}**.
        {_quiet_text} *See the Gap Card and "These may be worse than they look."*
     """
