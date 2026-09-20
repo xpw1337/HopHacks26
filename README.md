@@ -1,4 +1,4 @@
-# Baltimore Triage
+# BeMoreBaltimore
 
 **Where is Baltimore bad, and the city not responding?** A [marimo](https://marimo.io) notebook that doubles as a web app. It scores all 55 Community Statistical Areas on need vs service across 10 topics, then zooms from the whole city down to the street address of every still-open request.
 
