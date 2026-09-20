@@ -2211,12 +2211,13 @@ def _(anywidget, traitlets):
         """
 
         _esm = r"""
-        const RAMP = [[45, 158, 96], [226, 168, 62], [200, 56, 44]];
+        const RAMP = [[26, 132, 78], [226, 168, 62], [196, 52, 42]];
         const mixc = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+        const BAR = 0.25;                      // green means three in four reports closed
         const shade = (s) => {
           const t = Math.max(0, Math.min(1, s));
-          const [a, b, f] = t < 0.5 ? [RAMP[0], RAMP[1], t / 0.5] : [RAMP[1], RAMP[2], (t - 0.5) / 0.5];
-          return `rgb(${mixc(a, b, f).join(",")})`;
+          if (t <= BAR) return `rgb(${mixc(RAMP[0], RAMP[1], t / BAR).join(",")})`;
+          return `rgb(${mixc(RAMP[1], RAMP[2], (t - BAR) / (1 - BAR)).join(",")})`;
         };
 
         function render({ model, el }) {
@@ -2281,7 +2282,7 @@ def _(anywidget, traitlets):
             for (const [csa, p] of Object.entries(paths)) {
               const s = sAt(csa, t);
               if (s === null) { p.setAttribute("fill", "rgba(150,150,150,0.12)"); continue; }
-              p.setAttribute("fill", shade(s, barOf()));
+              p.setAttribute("fill", shade(s));
               const n = (model.get("labels")[csa] || {}).n || 0;
               num += s * n; den += n;
             }
