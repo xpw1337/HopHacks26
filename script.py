@@ -9,7 +9,6 @@
 #     "shapely==2.1.2",
 #     "httpx==0.28.1",
 #     "anywidget==0.11.0",
-#     "scikit-learn==1.7.2",
 # ]
 # ///
 
@@ -36,10 +35,12 @@ def _():
     import marimo as mo
     import numpy as np
     import polars as pl
-    from sklearn.ensemble import HistGradientBoostingClassifier
-    from sklearn.isotonic import IsotonicRegression
     import shapely
     import traitlets
+
+    # Training happens offline; the browser app only reads checked-in model outputs.
+    HistGradientBoostingClassifier = None
+    IsotonicRegression = None
 
     @alt.theme.register("triage", enable=True)
     def _triage_theme():

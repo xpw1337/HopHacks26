@@ -23,6 +23,24 @@ Delete `data/` to download a fresh snapshot from Open Baltimore (about 2 minutes
 
 **Share a view:** add `?area=` to the app URL, for example `http://localhost:2718/?area=Cherry%20Hill`.
 
+## Deploy to GitHub Pages
+
+The Pages build runs the app entirely in the browser with marimo WebAssembly. It serves the saved snapshot and
+audio from `public/`, disables live API calls, and loads the expensive fix-clock/model outputs from the checked-in
+`data/precomputed/` cache.
+
+Test the same build locally:
+
+```bash
+python scripts/build_pages_assets.py
+python -m marimo export html-wasm script.py -o dist --mode run --execute --no-sandbox
+python -m http.server 8000 --directory dist
+```
+
+Then open `http://localhost:8000`. To publish, set **Settings → Pages → Source** to **GitHub Actions** and push
+`main` or `feature/github-pages-deployment`. The workflow in `.github/workflows/pages.yml` builds and deploys the
+site. `public/data/` and `dist/` are generated artifacts and are intentionally ignored by git.
+
 ## What's inside
 
 | File | What it is |
@@ -30,6 +48,9 @@ Delete `data/` to download a fresh snapshot from Open Baltimore (about 2 minutes
 | `script.py` | The notebook and app: story, map explorer (a custom anywidget), scoring, checks |
 | `app.css` | App styling (hero header, section headings, sidebar links) |
 | `data/` | Snapshot of 9 Open Baltimore and BNIA datasets (2026-09-18) |
+| `data/precomputed/` | Cached model outputs used by local and browser builds |
+| `scripts/build_pages_assets.py` | Copies and simplifies browser-served data into `public/` |
+| `.github/workflows/pages.yml` | Builds and deploys the interactive WASM app |
 | `Bmore_plan.md` | Project plan and method |
 | `agent_log.md` | Notes on using an AI coding agent: what helped, what went wrong |
 | `marimo_feedback.md` | Our notes on marimo features, bugs and requests |
