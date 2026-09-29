@@ -3,3 +3,4 @@ __marimo__/
 *.pyc
 .venv/
 data/.neglect_probe_cache.parquet
+dist/
